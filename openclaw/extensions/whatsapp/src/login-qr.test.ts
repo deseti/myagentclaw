@@ -1,0 +1,147 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { startWebLoginWithQr, waitForWebLogin } from "./login-qr.js";
+import { renderQrPngBase64 } from "./qr-image.js";
+import {
+  createWaSocket,
+  logoutWeb,
+  waitForCredsSaveQueueWithTimeout,
+  waitForWaConnection,
+} from "./session.js";
+
+vi.mock("./session.js", async () => {
+  const actual = await vi.importActual<typeof import("./session.js")>("./session.js");
+  const createWaSocket = vi.fn(
+    async (
+      _printQr: boolean,
+      _verbose: boolean,
+      opts?: {
+        onQr?: (qr: string) => void;
+        onAuthStateLoaded?: (details: { authDir: string; loadedAt: string }) => void;
+        onCredsUpdate?: () => void;
+        onCredsSave?: (result: { ok: boolean; savedAt: string; error?: unknown }) => void;
+        onConnectionUpdate?: (update: Record<string, unknown>) => void;
+      },
+    ) => {
+      const sock = { ws: { close: vi.fn() } };
+      opts?.onAuthStateLoaded?.({ authDir: "/tmp/auth", loadedAt: "2024-01-01T00:00:00.000Z" });
+      if (opts?.onQr) {
+        setImmediate(() => {
+          opts.onQr?.("qr-data");
+          opts.onConnectionUpdate?.({ isNewLogin: true });
+          opts.onCredsUpdate?.();
+          opts.onCredsSave?.({ ok: true, savedAt: "2024-01-01T00:00:01.000Z" });
+        });
+      }
+      return sock;
+    },
+  );
+  const waitForWaConnection = vi.fn();
+  const formatError = vi.fn((err: unknown) => `formatted:${String(err)}`);
+  const getStatusCode = vi.fn(
+    (err: unknown) =>
+      (err as { output?: { statusCode?: number } })?.output?.statusCode ??
+      (err as { status?: number })?.status ??
+      (err as { error?: { output?: { statusCode?: number } } })?.error?.output?.statusCode,
+  );
+  const webAuthExists = vi.fn(async () => false);
+  const readWebSelfId = vi.fn(() => ({ e164: "+15551234567", jid: "15551234567@s.whatsapp.net" }));
+  const logoutWeb = vi.fn(async () => true);
+  const waitForCredsSaveQueueWithTimeout = vi.fn(async () => {});
+  return {
+    ...actual,
+    createWaSocket,
+    waitForWaConnection,
+    formatError,
+    getStatusCode,
+    webAuthExists,
+    readWebSelfId,
+    logoutWeb,
+    waitForCredsSaveQueueWithTimeout,
+  };
+});
+
+vi.mock("./qr-image.js", () => ({
+  renderQrPngBase64: vi.fn(async () => "base64"),
+}));
+
+const createWaSocketMock = vi.mocked(createWaSocket);
+const renderQrPngBase64Mock = vi.mocked(renderQrPngBase64);
+const waitForWaConnectionMock = vi.mocked(waitForWaConnection);
+const waitForCredsSaveQueueWithTimeoutMock = vi.mocked(waitForCredsSaveQueueWithTimeout);
+const logoutWebMock = vi.mocked(logoutWeb);
+
+async function flushTasks() {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+describe("login-qr", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("restarts login once on status 515 and completes", async () => {
+    let releaseCredsFlush: (() => void) | undefined;
+    const credsFlushGate = new Promise<void>((resolve) => {
+      releaseCredsFlush = resolve;
+    });
+    waitForWaConnectionMock
+      // Baileys v7 wraps the error: { error: BoomError(515) }
+      .mockRejectedValueOnce({ error: { output: { statusCode: 515 } } })
+      .mockResolvedValueOnce(undefined);
+    waitForCredsSaveQueueWithTimeoutMock.mockReturnValueOnce(credsFlushGate);
+
+    const start = await startWebLoginWithQr({ timeoutMs: 5000 });
+    expect(start.qrDataUrl).toBe("data:image/png;base64,base64");
+    expect(renderQrPngBase64Mock).toHaveBeenCalledWith("qr-data", {
+      targetSize: 768,
+      marginModules: 6,
+      errorCorrectionLevel: "H",
+    });
+
+    const resultPromise = waitForWebLogin({ timeoutMs: 5000 });
+    await flushTasks();
+    await flushTasks();
+
+    expect(createWaSocketMock).toHaveBeenCalledTimes(1);
+    expect(waitForCredsSaveQueueWithTimeoutMock).toHaveBeenCalledOnce();
+    expect(waitForCredsSaveQueueWithTimeoutMock).toHaveBeenCalledWith(expect.any(String));
+
+    releaseCredsFlush?.();
+    const result = await resultPromise;
+
+    expect(result.connected).toBe(true);
+    expect((result).runtimeStatus).toBe("CONNECTED");
+    expect((result).sessionPersistedAt).toBeTruthy();
+    expect(createWaSocketMock).toHaveBeenCalledTimes(2);
+    expect(logoutWebMock).not.toHaveBeenCalled();
+  });
+
+  it("does not report success before credentials are persisted", async () => {
+    createWaSocketMock.mockImplementationOnce(
+      async (
+        _printQr: boolean,
+        _verbose: boolean,
+        opts?: {
+          onQr?: (qr: string) => void;
+          onAuthStateLoaded?: (details: { authDir: string; loadedAt: string }) => void;
+        },
+      ) => {
+        const sock = { ws: { close: vi.fn() } };
+        opts?.onAuthStateLoaded?.({ authDir: "/tmp/auth", loadedAt: "2024-01-01T00:00:00.000Z" });
+        setImmediate(() => opts?.onQr?.("qr-data"));
+        return sock;
+      },
+    );
+    waitForWaConnectionMock.mockResolvedValueOnce(undefined);
+
+    const start = await startWebLoginWithQr({ timeoutMs: 5000 });
+    expect(start.qrDataUrl).toBe("data:image/png;base64,base64");
+
+    const result = await waitForWebLogin({ timeoutMs: 5000 });
+
+    expect(result.connected).toBe(false);
+    expect((result).runtimeStatus).toBe("LOGIN_FAILED");
+    expect((result).code).toBe("AUTH_SAVE_FAILED");
+  });
+});
