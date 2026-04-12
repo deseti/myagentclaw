@@ -1,0 +1,10 @@
+{
+  "id": "customer-block-guard",
+  "name": "Customer Block Guard",
+  "description": "Guards inbound customer access, blocking disallowed senders and enforcing approval-required flows",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

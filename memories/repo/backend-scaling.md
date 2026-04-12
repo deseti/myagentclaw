@@ -1,0 +1,4 @@
+- 2026-04-04: shared backend is still safe as a single instance; live snapshot showed about 0.06% CPU, about 117 MiB memory, Redis about 1.59 MiB, and 30/30 health responses succeeded.
+- Do not scale backend web to 2 instances yet; current blockers are process-local Socket.IO, workers and cron starting inside backend web, and runtime provisioning through Docker socket without distributed locking.
+- When scaling later: split web vs worker vs cron first, add Socket.IO Redis adapter, add Redis-backed provisioning lock by ownerId, then scale backend web to 2 behind nginx.
+- Operational risk: Redis currently uses allkeys-lru, but BullMQ wants noeviction; fix Redis eviction policy before treating backend web as the first bottleneck.

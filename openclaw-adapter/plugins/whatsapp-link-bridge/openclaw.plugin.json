@@ -1,0 +1,10 @@
+{
+  "id": "whatsapp-link-bridge",
+  "name": "WhatsApp Link Bridge",
+  "description": "Exposes gateway-authenticated HTTP routes for WhatsApp QR login state inside the OpenClaw gateway process",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

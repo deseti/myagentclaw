@@ -1,0 +1,10 @@
+{
+  "id": "polymarket-read-only",
+  "name": "Polymarket Read-only",
+  "description": "Read-only live Polymarket trending market, top-volume, orderbook, tag, and saved-position tools for agents",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

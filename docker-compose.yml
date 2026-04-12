@@ -1,0 +1,184 @@
+networks:
+  myagentclaw_net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  tg_sessions:
+  openclaw_data:    # ~/.openclaw configs, sessions, skills
+
+services:
+
+  # ── DATABASE ─────────────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    container_name: myagentclaw_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks: [myagentclaw_net]
+    ports:
+      - "5432:5432"   # expose di local untuk debugging
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  adminer:
+    image: adminer:4.8.1-standalone
+    container_name: myagentclaw_adminer
+    restart: unless-stopped
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+      ADMINER_DESIGN: pepa-linha
+    networks: [myagentclaw_net]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+
+  redis:
+    image: redis:7-alpine
+    container_name: myagentclaw_redis
+    restart: unless-stopped
+    command: redis-server --maxmemory 256mb --maxmemory-policy noeviction
+    volumes:
+      - redis_data:/data
+    networks: [myagentclaw_net]
+    ports:
+      - "6379:6379"   # expose di local untuk debugging
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  # ── AI RUNTIME (repo resmi openclaw/openclaw) ────────────────
+  openclaw:
+    build: ./openclaw
+    container_name: myagentclaw_openclaw
+    restart: unless-stopped
+    environment:
+      HOME: /home/node
+      NODE_ENV: production
+      OPENCLAW_GATEWAY_PORT: 18789
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      INTERNAL_SECRET_KEY: ${INTERNAL_SECRET_KEY}
+      BACKEND_INTERNAL_URL: http://backend:3001
+    volumes:
+      - openclaw_data:/home/node/.openclaw
+    networks: [myagentclaw_net]
+    command:
+      [
+        "node",
+        "dist/index.js",
+        "gateway",
+        "--bind",
+        "lan",
+        "--port",
+        "18789",
+        "--allow-unconfigured"
+      ]
+
+  # ── OPENCLAW ADAPTER (config + bot registration API) ────────
+  openclaw-adapter:
+    image: ${MYAGENTCLAW_ADAPTER_RUNTIME_IMAGE:-myagentclaw-openclaw-adapter-runtime:latest}
+    build: ./openclaw-adapter
+    container_name: myagentclaw_openclaw_adapter
+    restart: unless-stopped
+    environment:
+      HOME: /home/node
+      OPENCLAW_HOME: /home/node/.openclaw
+      OPENCLAW_GATEWAY_URL: http://openclaw:18789
+      ADAPTER_PORT: 4000
+      OPENCLAW_GATEWAY_PORT: 18789
+      INTERNAL_SECRET_KEY: ${INTERNAL_SECRET_KEY}
+      BACKEND_INTERNAL_URL: http://backend:3001
+      DEFAULT_LLM_MODEL: openai-codex/gpt-5.4
+    volumes:
+      - openclaw_data:/home/node/.openclaw
+    networks: [myagentclaw_net]
+    depends_on:
+      - openclaw
+
+  # ── BACKEND ──────────────────────────────────────────────────
+  backend:
+    build: ./backend
+    container_name: myagentclaw_backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET}
+      INTERNAL_SECRET_KEY: ${INTERNAL_SECRET_KEY}
+      POLYMARKET_CREDENTIALS_ENCRYPTION_KEY: ${POLYMARKET_CREDENTIALS_ENCRYPTION_KEY}
+      POLYMARKET_AUTOPILOT_LIVE_EXECUTION_ENABLED: ${POLYMARKET_AUTOPILOT_LIVE_EXECUTION_ENABLED:-true}
+      OPENCLAW_BASE_URL: http://openclaw-adapter:4000
+      OPENCLAW_ADAPTER_URL: http://openclaw-adapter:4000
+      OPENCLAW_GATEWAY_URL: http://openclaw:18789
+      XENDIT_SECRET_KEY: ${XENDIT_SECRET_KEY}
+      XENDIT_WEBHOOK_TOKEN: ${XENDIT_WEBHOOK_TOKEN}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      WA_SESSION_PATH: /app/tg-sessions
+      PORT: 3001
+      DEFAULT_LLM_PROVIDER: openai-codex
+      DEFAULT_LLM_MODEL: openai-codex/gpt-5.4
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      DOCKER_SOCKET_PATH: /var/run/docker.sock
+      MYAGENTCLAW_SHARED_OPENCLAW_CONTAINER: myagentclaw_openclaw
+      MYAGENTCLAW_SHARED_ADAPTER_CONTAINER: myagentclaw_openclaw_adapter
+      MYAGENTCLAW_OPENCLAW_RUNTIME_IMAGE: ${MYAGENTCLAW_OPENCLAW_RUNTIME_IMAGE:-}
+      MYAGENTCLAW_ADAPTER_RUNTIME_IMAGE: ${MYAGENTCLAW_ADAPTER_RUNTIME_IMAGE:-myagentclaw-openclaw-adapter-runtime:latest}
+    volumes:
+      - tg_sessions:/app/tg-sessions
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks: [myagentclaw_net]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      openclaw:
+        condition: service_started
+      openclaw-adapter:
+        condition: service_started
+    ports:
+      - "3001:3001"
+
+  # ── FRONTEND ─────────────────────────────────────────────────
+  frontend:
+    build: ./frontend
+    container_name: myagentclaw_frontend
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:3001/api}
+      NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-http://localhost:3001}
+      NEXT_PUBLIC_GOOGLE_CLIENT_ID: ${NEXT_PUBLIC_GOOGLE_CLIENT_ID}
+    networks: [myagentclaw_net]
+    depends_on:
+      - backend
+    ports:
+      - "3000:3000"
+
+  # ── REVERSE PROXY (uncomment saat test nginx lokal) ──────────
+  # nginx:
+  #   build: ./nginx
+  #   container_name: myagentclaw_nginx
+  #   ports:
+  #     - "80:80"
+  #   depends_on:
+  #     - frontend
+  #     - backend
+  #   networks: [myagentclaw_net]

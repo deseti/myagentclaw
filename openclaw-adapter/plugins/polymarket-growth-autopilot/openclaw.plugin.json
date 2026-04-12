@@ -1,0 +1,10 @@
+{
+  "id": "polymarket-growth-autopilot",
+  "name": "Polymarket Growth Autopilot",
+  "description": "Growth-only Polymarket automatic trading autopilot status and execution trigger tools for agents",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

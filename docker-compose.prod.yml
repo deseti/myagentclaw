@@ -1,0 +1,59 @@
+# docker-compose.prod.yml — Override untuk VPS Production
+# Cara pakai:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+services:
+  postgres:
+    ports: []   # tutup port, tidak boleh expose ke publik
+    restart: always
+
+  redis:
+    ports: []   # tutup port
+    restart: always
+
+  openclaw:
+    restart: always
+    environment:
+      NODE_ENV: production
+
+  backend:
+    ports: []   # tutup port, akses lewat nginx saja
+    restart: always
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: warn
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      NEXT_PUBLIC_API_URL: https://yourdomain.com/api
+      NEXT_PUBLIC_WS_URL: https://yourdomain.com
+      DOCKER_SOCKET_PATH: /var/run/docker.sock
+      MYAGENTCLAW_SHARED_OPENCLAW_CONTAINER: myagentclaw_openclaw
+      MYAGENTCLAW_SHARED_ADAPTER_CONTAINER: myagentclaw_openclaw_adapter
+      MYAGENTCLAW_OPENCLAW_RUNTIME_IMAGE: ${MYAGENTCLAW_OPENCLAW_RUNTIME_IMAGE:-}
+      MYAGENTCLAW_ADAPTER_RUNTIME_IMAGE: ${MYAGENTCLAW_ADAPTER_RUNTIME_IMAGE:-myagentclaw-openclaw-adapter-runtime:latest}
+      POLYMARKET_CREDENTIALS_ENCRYPTION_KEY: ${POLYMARKET_CREDENTIALS_ENCRYPTION_KEY}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  frontend:
+    ports: []   # tutup port, akses lewat nginx saja
+    restart: always
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_GOOGLE_CLIENT_ID: ${NEXT_PUBLIC_GOOGLE_CLIENT_ID}
+
+  nginx:
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    container_name: myagentclaw_nginx
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.prod.conf:/etc/nginx/nginx.conf
+      - /etc/letsencrypt:/etc/letsencrypt:ro   # SSL cert dari certbot
+    depends_on:
+      - frontend
+      - backend
+    networks: [myagentclaw_net]

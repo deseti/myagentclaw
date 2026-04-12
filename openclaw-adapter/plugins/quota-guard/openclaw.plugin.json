@@ -1,0 +1,10 @@
+{
+  "id": "quota-guard",
+  "name": "Quota Guard",
+  "description": "Blocks inbound Telegram turns before the LLM runs when workspace quota is exhausted",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}
