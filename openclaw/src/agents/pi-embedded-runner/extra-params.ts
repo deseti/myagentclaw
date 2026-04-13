@@ -88,6 +88,26 @@ export function resolveExtraParams(params: {
     delete merged.textVerbosity;
   }
 
+  const resolvedTopP = resolveAliasedParamValue(
+    [defaultParams, globalParams, agentParams],
+    "top_p",
+    "topP",
+  );
+  if (resolvedTopP !== undefined) {
+    merged.topP = resolvedTopP;
+    delete merged.top_p;
+  }
+
+  const resolvedReasoningEffort = resolveAliasedParamValue(
+    [defaultParams, globalParams, agentParams],
+    "reasoning_effort",
+    "reasoningEffort",
+  );
+  if (resolvedReasoningEffort !== undefined) {
+    merged.reasoningEffort = resolvedReasoningEffort;
+    delete merged.reasoning_effort;
+  }
+
   const resolvedCachedContent = resolveAliasedParamValue(
     [defaultParams, globalParams, agentParams],
     "cached_content",
@@ -107,6 +127,8 @@ type CacheRetentionStreamOptions = Partial<SimpleStreamOptions> & {
   cacheRetention?: "none" | "short" | "long";
   cachedContent?: string;
   openaiWsWarmup?: boolean;
+  topP?: number;
+  reasoningEffort?: string;
 };
 type SupportedTransport = Exclude<CacheRetentionStreamOptions["transport"], undefined>;
 
@@ -244,6 +266,9 @@ function createStreamFnWithExtraParams(
   if (typeof extraParams.maxTokens === "number") {
     streamParams.maxTokens = extraParams.maxTokens;
   }
+  if (typeof extraParams.topP === "number") {
+    streamParams.topP = extraParams.topP;
+  }
   const transport = resolveSupportedTransport(extraParams.transport);
   if (transport) {
     streamParams.transport = transport;
@@ -256,6 +281,15 @@ function createStreamFnWithExtraParams(
   }
   if (typeof extraParams.openaiWsWarmup === "boolean") {
     streamParams.openaiWsWarmup = extraParams.openaiWsWarmup;
+  }
+  const reasoningEffort =
+    typeof extraParams.reasoningEffort === "string"
+      ? extraParams.reasoningEffort
+      : typeof extraParams.reasoning_effort === "string"
+        ? extraParams.reasoning_effort
+        : undefined;
+  if (reasoningEffort) {
+    streamParams.reasoningEffort = reasoningEffort;
   }
   const cachedContent =
     typeof extraParams.cachedContent === "string"

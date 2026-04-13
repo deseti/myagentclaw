@@ -1,6 +1,7 @@
 import http from 'node:http';
 
 import prisma from './prisma.js';
+import { getAiProviderConfig } from './ai-provider-config.js';
 
 const DOCKER_SOCKET_PATH = process.env.DOCKER_SOCKET_PATH || '/var/run/docker.sock';
 const DOCKER_API_VERSION = process.env.DOCKER_API_VERSION || 'v1.41';
@@ -9,12 +10,15 @@ const SHARED_OPENCLAW_CONTAINER = process.env.MYAGENTCLAW_SHARED_OPENCLAW_CONTAI
 const SHARED_ADAPTER_CONTAINER = process.env.MYAGENTCLAW_SHARED_ADAPTER_CONTAINER || 'myagentclaw_openclaw_adapter';
 const DEFAULT_OPENCLAW_IMAGE = process.env.MYAGENTCLAW_OPENCLAW_RUNTIME_IMAGE || '';
 const DEFAULT_ADAPTER_IMAGE = process.env.MYAGENTCLAW_ADAPTER_RUNTIME_IMAGE || '';
-const DEFAULT_LLM_MODEL = process.env.DEFAULT_LLM_MODEL || 'openai-codex/gpt-5.4';
+const AI_PROVIDER_CONFIG = getAiProviderConfig();
+const DEFAULT_AI_PROVIDER_MODEL = AI_PROVIDER_CONFIG.model;
+const DEFAULT_AI_PROVIDER_IMAGE_MODEL = AI_PROVIDER_CONFIG.imageModel;
 const DEDICATED_GATEWAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || process.env.INTERNAL_SECRET_KEY || 'myagentclaw-dedicated-gateway-token';
 const BOOTSTRAP_OPENCLAW_HOME = '/home/node/.openclaw-bootstrap';
 const OPENCLAW_RUNTIME_WORKDIR = process.env.MYAGENTCLAW_OPENCLAW_RUNTIME_WORKDIR || '/app';
+const LEGACY_RUNTIME_WHATSAPP_AUTH_ROOT = `${OPENCLAW_RUNTIME_WORKDIR}/auth`;
+const DURABLE_RUNTIME_WHATSAPP_AUTH_ROOT = '/home/node/.openclaw/credentials/whatsapp';
 
-const runtimeImageCache = new Map();
 let networkNamePromise = null;
 let sharedStateVolumeNamePromise = null;
 const runtimeWhatsAppInstallPromises = new Map();
@@ -191,7 +195,11 @@ function parseGatewayCallOutput(output, method) {
 }
 
 function envValue(name, fallback = '') {
-  return `${name}=${process.env[name] || fallback}`;
+  const explicitValue = process.env[name];
+  const resolvedValue = explicitValue !== undefined && explicitValue !== ''
+    ? explicitValue
+    : fallback;
+  return `${name}=${resolvedValue ?? ''}`;
 }
 
 function envLiteral(name, value) {
@@ -249,8 +257,6 @@ async function detectBackendNetworkName() {
 }
 
 async function resolveImageFromContainer(containerName, fallbackEnvValue, cacheKey) {
-  if (runtimeImageCache.has(cacheKey)) return runtimeImageCache.get(cacheKey);
-
   const info = await inspectContainer(containerName).catch(() => null);
   const imageReference = fallbackEnvValue || info?.Config?.Image;
   const imageId = info?.Image || null;
@@ -263,7 +269,6 @@ async function resolveImageFromContainer(containerName, fallbackEnvValue, cacheK
     imageId,
   };
 
-  runtimeImageCache.set(cacheKey, imageSpec);
   return imageSpec;
 }
 
@@ -336,6 +341,9 @@ async function ensureContainerRunning({
 
   if (existing && (forceRecreate || containerNeedsRecreate(existing, { image, imageId, env, labels }))) {
     console.log(`[runtime-manager] Recreating container ${name}${forceRecreate ? ' (forced)' : ' due to image/env drift'}`);
+    await migrateLegacyWhatsAppAuthInContainer(name).catch((error) => {
+      console.warn(`[runtime-manager] legacy WhatsApp auth migration skipped for ${name}: ${error.message}`);
+    });
     await removeContainer(name);
   }
 
@@ -355,6 +363,58 @@ async function ensureContainerRunning({
   }
 
   await startContainer(name);
+}
+
+async function migrateLegacyWhatsAppAuthInContainer(containerName) {
+  const info = await inspectContainer(containerName);
+  if (!info) {
+    return { migrated: false, reason: 'container-missing' };
+  }
+
+  if (info.State?.Running !== true) {
+    return { migrated: false, reason: 'container-not-running' };
+  }
+
+  const migrationScript = [
+    "const fs = require('fs');",
+    "const path = require('path');",
+    `const legacyRoot = ${JSON.stringify(LEGACY_RUNTIME_WHATSAPP_AUTH_ROOT)};`,
+    `const durableRoot = ${JSON.stringify(DURABLE_RUNTIME_WHATSAPP_AUTH_ROOT)};`,
+    'if (!fs.existsSync(legacyRoot)) {',
+    "  console.log(JSON.stringify({ migrated: false, reason: 'legacy-missing' }));",
+    '  process.exit(0);',
+    '}',
+    'if (!fs.statSync(legacyRoot).isDirectory()) {',
+    "  console.log(JSON.stringify({ migrated: false, reason: 'legacy-not-directory' }));",
+    '  process.exit(0);',
+    '}',
+    'fs.mkdirSync(durableRoot, { recursive: true });',
+    'const copied = [];',
+    'for (const entry of fs.readdirSync(legacyRoot)) {',
+    '  const source = path.join(legacyRoot, entry);',
+    '  const target = path.join(durableRoot, entry);',
+    '  if (fs.existsSync(target)) {',
+    '    continue;',
+    '  }',
+    '  fs.cpSync(source, target, { recursive: true });',
+    '  copied.push(entry);',
+    '}',
+    'console.log(JSON.stringify({ migrated: copied.length > 0, copied }));',
+  ].join(' ');
+
+  const result = await execInContainer(containerName, ['node', '-e', migrationScript], {
+    timeoutMs: 30000,
+  });
+
+  if (result.exitCode && result.exitCode !== 0) {
+    throw new Error(result.output || 'legacy WhatsApp auth migration failed');
+  }
+
+  const parsed = parseGatewayCallOutput(result.output, 'legacy whatsapp auth migration') || { migrated: false };
+  if (parsed?.migrated) {
+    console.log(`[runtime-manager] migrated legacy WhatsApp auth in ${containerName}: ${(parsed.copied || []).join(', ')}`);
+  }
+  return parsed;
 }
 
 async function ensureDockerSocketAvailable() {
@@ -424,13 +484,20 @@ export async function ensureWorkspaceRuntime(workspace, options = {}) {
       envLiteral('OPENCLAW_BOOTSTRAP_HOME', BOOTSTRAP_OPENCLAW_HOME),
       `OPENCLAW_GATEWAY_URL=http://${names.openclawContainerName}:18789`,
       `OPENCLAW_GATEWAY_TOKEN=${DEDICATED_GATEWAY_TOKEN}`,
+      envValue('OPENAI_OAUTH_TOKEN'),
       envValue('OPENAI_API_KEY'),
-      envValue('ANTHROPIC_API_KEY'),
+      envValue('OPENAI_BASE_URL', AI_PROVIDER_CONFIG.baseURL),
+      envValue('OPENAI_MODEL', DEFAULT_AI_PROVIDER_MODEL),
+      envValue('OPENAI_IMAGE_MODEL', DEFAULT_AI_PROVIDER_IMAGE_MODEL),
+      envValue('OPENAI_TEMPERATURE', AI_PROVIDER_CONFIG.temperature),
+      envValue('OPENAI_TOP_P', AI_PROVIDER_CONFIG.topP),
+      envValue('OPENAI_MAX_TOKENS', AI_PROVIDER_CONFIG.maxTokens),
+      envValue('OPENAI_STREAM', AI_PROVIDER_CONFIG.stream),
+      envValue('OPENAI_REASONING', AI_PROVIDER_CONFIG.reasoning),
       envValue('ADAPTER_PORT', '4000'),
       envValue('OPENCLAW_GATEWAY_PORT', '18789'),
       envValue('INTERNAL_SECRET_KEY'),
       envValue('BACKEND_INTERNAL_URL', 'http://backend:3001'),
-      `DEFAULT_LLM_MODEL=${DEFAULT_LLM_MODEL}`,
       `MYAGENTCLAW_RUNTIME_TIER=${workspace.subTier}`,
       'MYAGENTCLAW_RUNTIME_MODE=DEDICATED',
       'MYAGENTCLAW_ENABLE_SHARED_WORKSPACE=1',
@@ -459,8 +526,16 @@ export async function ensureWorkspaceRuntime(workspace, options = {}) {
       envValue('NODE_ENV', 'production'),
       envValue('OPENCLAW_GATEWAY_PORT', '18789'),
       envLiteral('OPENCLAW_GATEWAY_TOKEN', DEDICATED_GATEWAY_TOKEN),
+      envValue('OPENAI_OAUTH_TOKEN'),
       envValue('OPENAI_API_KEY'),
-      envValue('ANTHROPIC_API_KEY'),
+      envValue('OPENAI_BASE_URL', AI_PROVIDER_CONFIG.baseURL),
+      envValue('OPENAI_MODEL', DEFAULT_AI_PROVIDER_MODEL),
+      envValue('OPENAI_IMAGE_MODEL', DEFAULT_AI_PROVIDER_IMAGE_MODEL),
+      envValue('OPENAI_TEMPERATURE', AI_PROVIDER_CONFIG.temperature),
+      envValue('OPENAI_TOP_P', AI_PROVIDER_CONFIG.topP),
+      envValue('OPENAI_MAX_TOKENS', AI_PROVIDER_CONFIG.maxTokens),
+      envValue('OPENAI_STREAM', AI_PROVIDER_CONFIG.stream),
+      envValue('OPENAI_REASONING', AI_PROVIDER_CONFIG.reasoning),
       envValue('INTERNAL_SECRET_KEY'),
       envValue('BACKEND_INTERNAL_URL', 'http://backend:3001'),
     ],

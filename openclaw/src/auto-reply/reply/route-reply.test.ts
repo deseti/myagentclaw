@@ -175,6 +175,28 @@ describe("routeReply", () => {
     await expectSlackNoDelivery({ text: SILENT_REPLY_TOKEN });
   });
 
+  it("sends a safe fallback when a WhatsApp reply sanitizes to empty", async () => {
+    const res = await routeReply({
+      payload: {
+        text: "The user is asking about pricing.\nI will respond in Bahasa Indonesia.",
+      },
+      channel: "whatsapp",
+      to: "628123456789",
+      cfg: {} as never,
+    });
+
+    expect(res.ok).toBe(true);
+    expectLastDelivery({
+      channel: "whatsapp",
+      to: "628123456789",
+      payloads: [
+        expect.objectContaining({
+          text: "Maaf, saya sedang mengalami gangguan sebentar. Coba kirim pesan lagi ya.",
+        }),
+      ],
+    });
+  });
+
   it("does not drop payloads that merely start with the silent token", async () => {
     const res = await routeReply({
       payload: { text: `${SILENT_REPLY_TOKEN} -- (why am I here?)` },

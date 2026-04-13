@@ -103,6 +103,7 @@ export function formatPaymentReminderDate(value) {
   try {
     return new Intl.DateTimeFormat('id-ID', {
       dateStyle: 'medium',
+      timeZone: 'Asia/Jakarta',
     }).format(date);
   } catch {
     return date.toISOString();

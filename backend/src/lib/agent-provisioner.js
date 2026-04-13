@@ -9,11 +9,46 @@
 
 import prisma from '../lib/prisma.js';
 import { buildGatewayAgentConfig } from './agent-config.js';
+import { getAiProviderConfig } from './ai-provider-config.js';
 import { ocStartChannel, ocStopChannel } from './openclaw-client.js';
 import { ensureRuntimeWhatsAppPluginInstalled, ensureWorkspaceRuntime, listCandidateAdapterUrls } from './runtime-manager.js';
 import { CHANNEL_TYPES } from './channel-utils.js';
 
-const DEFAULT_LLM_MODEL = process.env.DEFAULT_LLM_MODEL || 'openai-codex/gpt-5.4';
+const DEFAULT_AI_PROVIDER_MODEL = getAiProviderConfig().model;
+
+function asPlainObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+function normalizeWhatsAppSessionSegment(value, fallback = 'unassigned') {
+  const normalized = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+
+  return normalized || fallback;
+}
+
+function buildStoredWhatsAppGatewayAgentConfig(agent, channel) {
+  const sessionData = asPlainObject(channel?.sessionData);
+  const agentId = String(channel?.agentId || agent?.id || '').trim();
+  const agentSegment = normalizeWhatsAppSessionSegment(agentId);
+
+  return buildGatewayAgentConfig(agent, {
+    llmModel: DEFAULT_AI_PROVIDER_MODEL,
+    channelType: CHANNEL_TYPES.WHATSAPP,
+    whatsappAuthNamespace: typeof sessionData.authNamespace === 'string' && sessionData.authNamespace.trim()
+      ? sessionData.authNamespace.trim()
+      : `agent-${agentSegment}/whatsapp`,
+    runtimeSessionId: typeof sessionData.runtimeSessionId === 'string' && sessionData.runtimeSessionId.trim()
+      ? sessionData.runtimeSessionId.trim()
+      : `runtime-agent-${agentSegment}-whatsapp`,
+    adapterSessionId: typeof sessionData.adapterSessionId === 'string' && sessionData.adapterSessionId.trim()
+      ? sessionData.adapterSessionId.trim()
+      : `adapter-agent-${agentSegment}-whatsapp`,
+  });
+}
 
 /**
  * Sync satu agent ke openclaw:
@@ -25,7 +60,7 @@ export async function syncAgentToGateway(agentId) {
     where: { id: agentId },
     include: {
       workspace: { select: { id: true, name: true, ownerId: true, subTier: true } },
-      channels: { where: { status: 'CONNECTED' } },
+      channels: { where: { status: { not: 'DISCONNECTED' } } },
     },
   });
 
@@ -45,6 +80,15 @@ export async function syncAgentToGateway(agentId) {
     const credentials = ch.type === CHANNEL_TYPES.TELEGRAM
       ? { botToken: Buffer.from(ch.sessionData.tokenHash, 'base64').toString() }
       : {};
+    const gatewayAgentConfig = ch.type === CHANNEL_TYPES.WHATSAPP
+      ? buildStoredWhatsAppGatewayAgentConfig(agent, ch)
+      : {
+          ...buildGatewayAgentConfig(agent, {
+            llmModel: DEFAULT_AI_PROVIDER_MODEL,
+            botUsername: ch.sessionData?.botUsername || '',
+            channelType: ch.type,
+          }),
+        };
 
     if (agent.status === 'ACTIVE') {
       if (ch.type === CHANNEL_TYPES.WHATSAPP) {
@@ -60,13 +104,35 @@ export async function syncAgentToGateway(agentId) {
         await ocStopChannel(ch.id, ch.type, target).catch(() => {});
       }
 
-      await ocStartChannel(ch.id, ch.type, credentials, agentId, {
-        ...buildGatewayAgentConfig(agent, {
-          llmModel: agent.llmModel || DEFAULT_LLM_MODEL,
-          botUsername: ch.sessionData?.botUsername || '',
-          channelType: ch.type,
-        }),
-      }, runtime).catch((err) => console.warn(`[provisioner] startChannel ${ch.id}:`, err.message));
+      if (ch.type === CHANNEL_TYPES.WHATSAPP) {
+        console.log('[whatsapp-channel] restoring saved session', {
+          channelId: ch.id,
+          agentId,
+          authNamespace: gatewayAgentConfig.whatsappAuthNamespace || null,
+        });
+      }
+
+      await ocStartChannel(ch.id, ch.type, credentials, agentId, gatewayAgentConfig, runtime)
+        .then(() => {
+          if (ch.type === CHANNEL_TYPES.WHATSAPP) {
+            console.log('[whatsapp-channel] restored successfully', {
+              channelId: ch.id,
+              agentId,
+              authNamespace: gatewayAgentConfig.whatsappAuthNamespace || null,
+            });
+          }
+        })
+        .catch((err) => {
+          if (ch.type === CHANNEL_TYPES.WHATSAPP) {
+            console.warn('[whatsapp-channel] reconnect failed', {
+              channelId: ch.id,
+              agentId,
+              authNamespace: gatewayAgentConfig.whatsappAuthNamespace || null,
+              message: err.message,
+            });
+          }
+          console.warn(`[provisioner] startChannel ${ch.id}:`, err.message);
+        });
     } else {
       const targets = [runtime, ...cleanupTargets];
       for (const target of targets) {

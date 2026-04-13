@@ -204,6 +204,11 @@ import { pruneProcessedHistoryImages } from "./history-image-prune.js";
 import { detectAndLoadPromptImages } from "./images.js";
 import { buildAttemptReplayMetadata } from "./incomplete-turn.js";
 import { resolveLlmIdleTimeoutMs, streamWithIdleTimeout } from "./llm-idle-timeout.js";
+import {
+  buildPromptWithImageDescriptions,
+  canDescribePromptImages,
+  shouldUsePromptImageDescriptionFallback,
+} from "./attempt.prompt-image-fallback.js";
 import type { EmbeddedRunAttemptParams, EmbeddedRunAttemptResult } from "./types.js";
 
 export {
@@ -1670,7 +1675,9 @@ export async function runEmbeddedAttempt(
           const imageResult = await detectAndLoadPromptImages({
             prompt: effectivePrompt,
             workspaceDir: effectiveWorkspace,
-            model: params.model,
+            model: canDescribePromptImages({ cfg: params.config, model: params.model })
+              ? { input: ["image"] }
+              : params.model,
             existingImages: params.images,
             imageOrder: params.imageOrder,
             maxBytes: MAX_IMAGE_BYTES,
@@ -1683,17 +1690,49 @@ export async function runEmbeddedAttempt(
                 : undefined,
           });
 
+          let promptText = effectivePrompt;
+          let promptImages = imageResult.images;
+          if (
+            shouldUsePromptImageDescriptionFallback({
+              cfg: params.config,
+              model: params.model,
+              hasImages: promptImages.length > 0,
+            })
+          ) {
+            try {
+              const describedPrompt = await buildPromptWithImageDescriptions({
+                cfg: params.config,
+                agentDir,
+                model: params.model,
+                prompt: effectivePrompt,
+                images: promptImages,
+              });
+              promptText = describedPrompt.prompt;
+              promptImages = [];
+              log.info(
+                `[prompt-image-fallback] described ${imageResult.images.length} image(s) via ` +
+                  `${describedPrompt.provider}/${describedPrompt.model} before prompting ` +
+                  `${params.provider}/${params.modelId}`,
+              );
+            } catch (fallbackErr) {
+              log.warn(
+                `[prompt-image-fallback] failed for ${params.provider}/${params.modelId}: ` +
+                  describeUnknownError(fallbackErr),
+              );
+            }
+          }
+
           cacheTrace?.recordStage("prompt:images", {
-            prompt: effectivePrompt,
+            prompt: promptText,
             messages: activeSession.messages,
-            note: `images: prompt=${imageResult.images.length}`,
+            note: `images: prompt=${promptImages.length}`,
           });
 
           // Diagnostic: log context sizes before prompt to help debug early overflow errors.
           if (log.isEnabled("debug")) {
             const msgCount = activeSession.messages.length;
             const systemLen = systemPromptText?.length ?? 0;
-            const promptLen = effectivePrompt.length;
+            const promptLen = promptText.length;
             const sessionSummary = summarizeSessionContext(activeSession.messages);
             log.debug(
               `[context-diag] pre-prompt: sessionKey=${params.sessionKey ?? params.sessionId} ` +
@@ -1702,7 +1741,7 @@ export async function runEmbeddedAttempt(
                 `maxMessageTextChars=${sessionSummary.maxMessageTextChars} ` +
                 `historyImageBlocks=${sessionSummary.totalImageBlocks} ` +
                 `systemPromptChars=${systemLen} promptChars=${promptLen} ` +
-                `promptImages=${imageResult.images.length} ` +
+                `promptImages=${promptImages.length} ` +
                 `provider=${params.provider}/${params.modelId} sessionFile=${params.sessionFile}`,
             );
           }
@@ -1716,9 +1755,9 @@ export async function runEmbeddedAttempt(
                   provider: params.provider,
                   model: params.modelId,
                   systemPrompt: systemPromptText,
-                  prompt: effectivePrompt,
+                  prompt: promptText,
                   historyMessages: activeSession.messages,
-                  imagesCount: imageResult.images.length,
+                  imagesCount: promptImages.length,
                 },
                 {
                   runId: params.runId,
@@ -1740,15 +1779,15 @@ export async function runEmbeddedAttempt(
           updateActiveEmbeddedRunSnapshot(params.sessionId, {
             transcriptLeafId,
             messages: btwSnapshotMessages,
-            inFlightPrompt: effectivePrompt,
+            inFlightPrompt: promptText,
           });
 
           // Only pass images option if there are actually images to pass
           // This avoids potential issues with models that don't expect the images parameter
-          if (imageResult.images.length > 0) {
-            await abortable(activeSession.prompt(effectivePrompt, { images: imageResult.images }));
+          if (promptImages.length > 0) {
+            await abortable(activeSession.prompt(promptText, { images: promptImages }));
           } else {
-            await abortable(activeSession.prompt(effectivePrompt));
+            await abortable(activeSession.prompt(promptText));
           }
         } catch (err) {
           // Yield-triggered abort is intentional — treat as clean stop, not error.

@@ -3,8 +3,10 @@
 
 import { PrismaClient } from '@prisma/client'
 import bcrypt from 'bcrypt'
+import { AI_PROVIDER_DB_VALUE, getAiProviderConfig } from '../src/lib/ai-provider-config.js'
 
 const prisma = new PrismaClient()
+const aiProviderConfig = getAiProviderConfig()
 
 async function main() {
   console.log('🌱 Seeding database...')
@@ -49,8 +51,8 @@ async function main() {
       persona: 'Asisten penjualan yang ramah dan helpful',
       tone: 'santai',
       goal: 'Membantu customer mendapatkan informasi produk dan melakukan pembelian',
-      llmProvider: 'openai',
-      llmModel: 'gpt-4o-mini',
+      llmProvider: AI_PROVIDER_DB_VALUE,
+      llmModel: aiProviderConfig.model,
       status: 'ACTIVE',
     },
   })

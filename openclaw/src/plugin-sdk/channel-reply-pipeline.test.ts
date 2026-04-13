@@ -78,4 +78,20 @@ describe("createChannelReplyPipeline", () => {
     expect(onReplyStart).toHaveBeenCalledTimes(1);
     expect(onIdle).toHaveBeenCalledTimes(1);
   });
+
+  it("marks WhatsApp and Telegram pipelines for customer-facing sanitization", () => {
+    const telegramPipeline = createChannelReplyPipeline({
+      cfg: {},
+      agentId: "main",
+      channel: "telegram",
+    });
+    const discordPipeline = createChannelReplyPipeline({
+      cfg: {},
+      agentId: "main",
+      channel: "discord",
+    });
+
+    expect(telegramPipeline.sanitizeCustomerFacingText).toBe(true);
+    expect(discordPipeline.sanitizeCustomerFacingText).toBeUndefined();
+  });
 });

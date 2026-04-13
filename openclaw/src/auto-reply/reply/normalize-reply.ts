@@ -13,12 +13,14 @@ import {
   resolveResponsePrefixTemplate,
   type ResponsePrefixContext,
 } from "./response-prefix-template.js";
+import { sanitizeCustomerFacingReplyText } from "./customer-facing-reply.js";
 
 export type NormalizeReplySkipReason = "empty" | "silent" | "heartbeat";
 
 export type NormalizeReplyOptions = {
   responsePrefix?: string;
   applyChannelTransforms?: boolean;
+  sanitizeCustomerFacingText?: boolean;
   /** Context for template variable interpolation in responsePrefix */
   responsePrefixContext?: ResponsePrefixContext;
   onHeartbeatStrip?: () => void;
@@ -88,6 +90,9 @@ export function normalizeReplyPayload(
 
   if (text) {
     text = sanitizeUserFacingText(text, { errorContext: Boolean(payload.isError) });
+    if (opts.sanitizeCustomerFacingText) {
+      text = sanitizeCustomerFacingReplyText(text);
+    }
   }
   if (!hasContent(text)) {
     opts.onSkip?.("empty");

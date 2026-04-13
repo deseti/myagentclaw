@@ -54,26 +54,124 @@ const PAYMENT_REMINDER_EVENTS = [
   'payment-reminder:updated',
 ];
 
+const REMINDER_TYPES_REQUIRING_AMOUNT = new Set(['INVOICE', 'DP', 'INSTALLMENT']);
+const WIB_OFFSET_HOURS = 7;
+
+function pad2(value) {
+  return String(value).padStart(2, '0');
+}
+
+function parseIncomingWibDate(value) {
+  if (!value) return null;
+
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+
+  const normalized = String(value).trim();
+  if (!normalized) return null;
+
+  const hasExplicitOffset = /(?:Z|[+\-]\d{2}:\d{2})$/i.test(normalized);
+  if (hasExplicitOffset) {
+    const parsed = new Date(normalized);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+
+  const localDateTimeMatch = normalized.match(/^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2})(?::(\d{2}))?(?:\.(\d{1,3}))?$/);
+  if (localDateTimeMatch) {
+    const [, year, month, day, hour, minute, second = '0', millisecond = '0'] = localDateTimeMatch;
+    const ms = Number(millisecond.padEnd(3, '0'));
+    return new Date(Date.UTC(
+      Number(year),
+      Number(month) - 1,
+      Number(day),
+      Number(hour) - WIB_OFFSET_HOURS,
+      Number(minute),
+      Number(second),
+      ms,
+    ));
+  }
+
+  const localDateMatch = normalized.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (localDateMatch) {
+    const [, year, month, day] = localDateMatch;
+    return new Date(Date.UTC(Number(year), Number(month) - 1, Number(day), -WIB_OFFSET_HOURS, 0, 0, 0));
+  }
+
+  const parsed = new Date(normalized);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function getValidationDetailMessage(details) {
+  if (!details || typeof details !== 'object') {
+    return '';
+  }
+
+  const entries = Object.entries(details);
+  for (const [, messages] of entries) {
+    if (Array.isArray(messages) && messages.length > 0) {
+      return String(messages[0]);
+    }
+  }
+
+  return '';
+}
+
 function getErrorMessage(err, fallback) {
-  return err?.response?.data?.message || err?.response?.data?.error || fallback;
+  const responseData = err?.response?.data;
+  const detailMessage = getValidationDetailMessage(responseData?.details);
+
+  if (responseData?.message && responseData.message !== 'Validation error') {
+    return responseData.message;
+  }
+
+  if (detailMessage) {
+    return detailMessage;
+  }
+
+  return responseData?.error || fallback;
 }
 
 function toDateTimeLocal(value) {
   if (!value) return '';
 
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
+  const date = parseIncomingWibDate(value);
+  if (!date) {
     return '';
   }
 
-  const timezoneOffsetMs = date.getTimezoneOffset() * 60_000;
-  return new Date(date.getTime() - timezoneOffsetMs).toISOString().slice(0, 16);
+  const wibDate = new Date(date.getTime() + WIB_OFFSET_HOURS * 60 * 60 * 1000);
+  const year = wibDate.getUTCFullYear();
+  const month = pad2(wibDate.getUTCMonth() + 1);
+  const day = pad2(wibDate.getUTCDate());
+  const hour = pad2(wibDate.getUTCHours());
+  const minute = pad2(wibDate.getUTCMinutes());
+
+  return `${year}-${month}-${day}T${hour}:${minute}`;
 }
 
 function toIsoString(value) {
   if (!value) return undefined;
 
+  const localDateTimePattern = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/;
+  const localMatch = String(value).match(localDateTimePattern);
+
+  if (localMatch) {
+    const [, year, month, day, hour, minute] = localMatch;
+    const utcMs = Date.UTC(
+      Number(year),
+      Number(month) - 1,
+      Number(day),
+      Number(hour) - WIB_OFFSET_HOURS,
+      Number(minute),
+      0,
+      0,
+    );
+    return new Date(utcMs).toISOString();
+  }
+
   const date = new Date(value);
+
   if (Number.isNaN(date.getTime())) {
     return undefined;
   }
@@ -82,10 +180,13 @@ function toIsoString(value) {
 }
 
 function nextReminderDate(hoursAhead = 24) {
-  const date = new Date();
-  date.setMinutes(0, 0, 0);
-  date.setHours(date.getHours() + hoursAhead);
-  return toDateTimeLocal(date.toISOString());
+  const now = new Date();
+  const nowWib = new Date(now.getTime() + WIB_OFFSET_HOURS * 60 * 60 * 1000);
+  nowWib.setUTCMinutes(0, 0, 0);
+  nowWib.setUTCHours(nowWib.getUTCHours() + hoursAhead);
+
+  const utcDate = new Date(nowWib.getTime() - WIB_OFFSET_HOURS * 60 * 60 * 1000);
+  return toDateTimeLocal(utcDate.toISOString());
 }
 
 function buildReminderForm({ reminder = null, template = null, defaultAgentId = '' } = {}) {
@@ -433,7 +534,7 @@ function ReminderFormDialog({
 
           <div className="grid gap-4 md:grid-cols-2">
             <div className="space-y-2">
-              <Label>Due Date</Label>
+              <Label>Due Date (WIB)</Label>
               <Input
                 className="border-slate-700 bg-slate-900"
                 type="datetime-local"
@@ -443,7 +544,7 @@ function ReminderFormDialog({
             </div>
 
             <div className="space-y-2">
-              <Label>Scheduled At</Label>
+              <Label>Scheduled At (WIB)</Label>
               <Input
                 className="border-slate-700 bg-slate-900"
                 type="datetime-local"
@@ -961,6 +1062,29 @@ export default function PaymentReminderPage() {
       return;
     }
 
+    const dueDateIso = toIsoString(form.dueDate);
+    if (!dueDateIso) {
+      setFormDialog((current) => ({ ...current, error: 'Due date tidak valid.' }));
+      return;
+    }
+
+    const amountValue = form.amount === '' ? null : Number(form.amount);
+    if (form.amount !== '' && Number.isNaN(amountValue)) {
+      setFormDialog((current) => ({ ...current, error: 'Nominal tidak valid.' }));
+      return;
+    }
+
+    if (REMINDER_TYPES_REQUIRING_AMOUNT.has(form.type) && (amountValue === null || amountValue < 0)) {
+      setFormDialog((current) => ({ ...current, error: 'Nominal wajib diisi untuk tipe reminder ini.' }));
+      return;
+    }
+
+    const scheduledAtIso = form.scheduledAt ? toIsoString(form.scheduledAt) : undefined;
+    if (form.scheduledAt && !scheduledAtIso) {
+      setFormDialog((current) => ({ ...current, error: 'Scheduled At tidak valid.' }));
+      return;
+    }
+
     setFormDialog((current) => ({ ...current, saving: true, error: '' }));
 
     const payload = {
@@ -970,16 +1094,16 @@ export default function PaymentReminderPage() {
       type: form.type,
       title: form.title.trim() || undefined,
       description: form.description.trim() || undefined,
-      amount: form.amount === '' ? null : Number(form.amount),
+      amount: amountValue,
       currency: form.currency.trim().toUpperCase() || 'IDR',
-      dueDate: toIsoString(form.dueDate),
+      dueDate: dueDateIso,
       templateType: form.templateType || form.type,
       messageContent: form.messageContent.trim() || undefined,
     };
 
     const scheduledAtChanged = formDialog.mode === 'create' || form.scheduledAt !== form.originalScheduledAt;
-    if (form.scheduledAt && scheduledAtChanged) {
-      payload.scheduledAt = toIsoString(form.scheduledAt);
+    if (scheduledAtIso && scheduledAtChanged) {
+      payload.scheduledAt = scheduledAtIso;
     }
 
     try {

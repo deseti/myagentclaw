@@ -7,6 +7,9 @@ import { definePluginEntry } from 'openclaw/plugin-sdk/plugin-entry';
 const MAX_BODY_BYTES = 64 * 1024;
 const FRESH_LOGIN_CONFIG_SYNC_TIMEOUT_MS = 5000;
 const FRESH_LOGIN_CONFIG_SYNC_POLL_MS = 200;
+const OPENCLAW_HOME = process.env.OPENCLAW_HOME || '/home/node/.openclaw';
+const OPENCLAW_OAUTH_DIR = process.env.OPENCLAW_OAUTH_DIR || join(OPENCLAW_HOME, 'credentials');
+const WHATSAPP_AUTH_ROOT = join(OPENCLAW_OAUTH_DIR, 'whatsapp');
 const WHATSAPP_PLUGIN_IDS = ['whatsapp', '@openclaw/whatsapp'];
 const START_ROUTE_ALIASES = Object.freeze([
   '/api/myagentclaw/whatsapp/link/start',
@@ -202,7 +205,7 @@ function normalizeFreshAuthNamespace(value) {
 
 function resolveFreshAuthDir(authNamespace) {
   const normalized = normalizeFreshAuthNamespace(authNamespace);
-  return normalized ? `auth/${normalized}` : '';
+  return normalized ? join(WHATSAPP_AUTH_ROOT, ...normalized.split('/').filter(Boolean)) : '';
 }
 
 function createDetailedHttpError(statusCode, message, details = null) {

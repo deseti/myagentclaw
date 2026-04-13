@@ -37,8 +37,11 @@ Centang semua item sebelum go-live di production.
 - [ ] `POSTGRES_PASSWORD` — password kuat (min 20 karakter, acak)
 - [ ] `JWT_SECRET` — min 32 karakter acak (`openssl rand -hex 32`)
 - [ ] `INTERNAL_SECRET_KEY` — min 32 karakter acak
-- [ ] `OPENAI_API_KEY` — sudah diset dan aktif
-- [ ] `ANTHROPIC_API_KEY` — sudah diset (opsional jika tidak pakai Claude)
+- [ ] `OPENAI_API_KEY` — AI Provider key sudah diset dan aktif
+- [ ] `OPENAI_BASE_URL` — base URL Groq / OpenAI-compatible Provider sudah benar (`https://api.groq.com/openai/v1`)
+- [ ] `OPENAI_MODEL` — model Groq sudah benar (`qwen/qwen3-32b`)
+- [ ] `OPENAI_TEMPERATURE`, `OPENAI_TOP_P`, `OPENAI_MAX_TOKENS` — nilai sampling dan batas output sudah sesuai
+- [ ] `OPENAI_STREAM` dan `OPENAI_REASONING` — mode streaming dan reasoning sudah sesuai kebutuhan channel customer
 - [ ] `XENDIT_SECRET_KEY` — key production (bukan test key)
 - [ ] `XENDIT_WEBHOOK_TOKEN` — token verification dari dashboard Xendit
 - [ ] `TELEGRAM_BOT_TOKEN` — bot token production dari @BotFather

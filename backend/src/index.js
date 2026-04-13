@@ -4,6 +4,7 @@ import jwt from '@fastify/jwt';
 
 import { Server as SocketIOServer } from 'socket.io';
 import prisma from './lib/prisma.js';
+import { validateAiProviderConfig } from './lib/ai-provider-config.js';
 import { syncAgentToGateway } from './lib/agent-provisioner.js';
 
 // ---------------------------------------------------------------------------
@@ -200,7 +201,7 @@ async function syncBotsToOpenclaw() {
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
       const channels = await prisma.channel.findMany({
-        where: { status: 'CONNECTED' },
+        where: { status: { not: 'DISCONNECTED' } },
         select: { agentId: true },
       });
 
@@ -230,6 +231,7 @@ async function syncBotsToOpenclaw() {
 const PORT = parseInt(process.env.PORT || '3001', 10);
 
 try {
+  validateAiProviderConfig(fastify.log);
   await prisma.$connect();
   fastify.log.info('Prisma connected to database');
 

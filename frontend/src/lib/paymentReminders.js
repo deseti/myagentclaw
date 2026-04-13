@@ -40,6 +40,49 @@ export const DEFAULT_PAYMENT_REMINDER_TEMPLATES = [
   },
 ];
 
+const WIB_OFFSET_HOURS = 7;
+
+function parsePaymentReminderDate(value) {
+  if (!value) return null;
+
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+
+  const normalized = String(value).trim();
+  if (!normalized) return null;
+
+  const hasExplicitOffset = /(?:Z|[+\-]\d{2}:\d{2})$/i.test(normalized);
+  if (hasExplicitOffset) {
+    const parsed = new Date(normalized);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+
+  const localDateTimeMatch = normalized.match(/^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2})(?::(\d{2}))?(?:\.(\d{1,3}))?$/);
+  if (localDateTimeMatch) {
+    const [, year, month, day, hour, minute, second = '0', millisecond = '0'] = localDateTimeMatch;
+    const ms = Number(millisecond.padEnd(3, '0'));
+    return new Date(Date.UTC(
+      Number(year),
+      Number(month) - 1,
+      Number(day),
+      Number(hour) - WIB_OFFSET_HOURS,
+      Number(minute),
+      Number(second),
+      ms,
+    ));
+  }
+
+  const localDateMatch = normalized.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (localDateMatch) {
+    const [, year, month, day] = localDateMatch;
+    return new Date(Date.UTC(Number(year), Number(month) - 1, Number(day), -WIB_OFFSET_HOURS, 0, 0, 0));
+  }
+
+  const parsed = new Date(normalized);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
 export function getPaymentReminderTypeLabel(value) {
   return PAYMENT_REMINDER_TYPE_OPTIONS.find((item) => item.value === value)?.label || value || '-';
 }
@@ -88,8 +131,8 @@ export function formatPaymentReminderAmount(amount, currency = 'IDR') {
 export function formatPaymentReminderDate(value) {
   if (!value) return '-';
 
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
+  const date = parsePaymentReminderDate(value);
+  if (!date) {
     return '-';
   }
 
@@ -97,6 +140,7 @@ export function formatPaymentReminderDate(value) {
     return new Intl.DateTimeFormat('id-ID', {
       dateStyle: 'medium',
       timeStyle: 'short',
+      timeZone: 'Asia/Jakarta',
     }).format(date);
   } catch {
     return date.toISOString();

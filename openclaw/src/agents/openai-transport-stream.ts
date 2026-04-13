@@ -41,6 +41,7 @@ const DEFAULT_AZURE_OPENAI_API_VERSION = "2024-12-01-preview";
 
 type BaseStreamOptions = {
   temperature?: number;
+  topP?: number;
   maxTokens?: number;
   signal?: AbortSignal;
   apiKey?: string;
@@ -51,7 +52,7 @@ type BaseStreamOptions = {
 };
 
 type OpenAIResponsesOptions = BaseStreamOptions & {
-  reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh";
+  reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
   reasoningSummary?: "auto" | "detailed" | "concise" | null;
   serviceTier?: ResponseCreateParamsStreaming["service_tier"];
 };
@@ -67,7 +68,7 @@ type OpenAICompletionsOptions = BaseStreamOptions & {
           name: string;
         };
       };
-  reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh";
+  reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
 };
 
 type OpenAIModeModel = Model<Api> & {
@@ -758,6 +759,9 @@ export function buildOpenAIResponsesParams(
   if (options?.temperature !== undefined) {
     params.temperature = options.temperature;
   }
+  if (options?.topP !== undefined) {
+    params.top_p = options.topP;
+  }
   if (options?.serviceTier !== undefined && payloadPolicy.allowsServiceTier) {
     params.service_tier = options.serviceTier;
   }
@@ -769,7 +773,9 @@ export function buildOpenAIResponsesParams(
     });
   }
   if (model.reasoning) {
-    if (options?.reasoningEffort || options?.reasoningSummary) {
+    if (options?.reasoningEffort === "none") {
+      params.reasoning = { effort: "none" };
+    } else if (options?.reasoningEffort || options?.reasoningSummary) {
       params.reasoning = {
         effort: options?.reasoningEffort || "medium",
         summary: options?.reasoningSummary || "auto",
@@ -1211,6 +1217,7 @@ type OpenAIResponsesRequestParams = {
   store?: boolean;
   max_output_tokens?: number;
   temperature?: number;
+  top_p?: number;
   service_tier?: ResponseCreateParamsStreaming["service_tier"];
   tools?: FunctionTool[];
   reasoning?:
@@ -1282,6 +1289,9 @@ export function buildOpenAICompletionsParams(
   if (options?.temperature !== undefined) {
     params.temperature = options.temperature;
   }
+  if (options?.topP !== undefined) {
+    params.top_p = options.topP;
+  }
   if (context.tools) {
     params.tools = convertTools(context.tools, compat, model);
   } else if (hasToolHistory(context.messages)) {
@@ -1290,11 +1300,19 @@ export function buildOpenAICompletionsParams(
   if (options?.toolChoice) {
     params.tool_choice = options.toolChoice;
   }
-  if (compat.thinkingFormat === "openrouter" && model.reasoning && options?.reasoningEffort) {
+  if (
+    compat.thinkingFormat === "openrouter" &&
+    model.reasoning &&
+    options?.reasoningEffort !== undefined
+  ) {
     params.reasoning = {
       effort: mapReasoningEffort(options.reasoningEffort, compat.reasoningEffortMap),
     };
-  } else if (options?.reasoningEffort && model.reasoning && compat.supportsReasoningEffort) {
+  } else if (
+    options?.reasoningEffort !== undefined &&
+    model.reasoning &&
+    compat.supportsReasoningEffort
+  ) {
     params.reasoning_effort = mapReasoningEffort(
       options.reasoningEffort,
       compat.reasoningEffortMap,

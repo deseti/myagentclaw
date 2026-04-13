@@ -52,8 +52,6 @@ describe('POST /api/agents', () => {
         persona: 'Asisten penjualan yang ramah',
         tone: 'FRIENDLY',
         goal: 'Membantu customer mendapatkan informasi produk',
-        llm_provider: 'openai',
-        llm_model: 'gpt-4o-mini',
       },
     });
 

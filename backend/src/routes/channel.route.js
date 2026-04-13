@@ -46,6 +46,9 @@ const FORCE_START_TIMEOUT_MS = 45000;
 const RESTORE_SESSION_MESSAGE = 'Mencoba mengaktifkan sesi WhatsApp lama.';
 const FORCE_NEW_QR_MESSAGE = 'Restore session terlalu lama, sistem membuat QR baru...';
 const MANUAL_FRESH_LOGIN_MESSAGE = 'Memulai login WhatsApp baru khusus agent ini.';
+const RUNTIME_OPENCLAW_HOME = process.env.MYAGENTCLAW_RUNTIME_OPENCLAW_HOME || '/home/node/.openclaw';
+const RUNTIME_OPENCLAW_OAUTH_DIR = process.env.MYAGENTCLAW_RUNTIME_OPENCLAW_OAUTH_DIR || `${RUNTIME_OPENCLAW_HOME}/credentials`;
+const RUNTIME_WHATSAPP_AUTH_ROOT = `${RUNTIME_OPENCLAW_OAUTH_DIR}/whatsapp`;
 
 function normalizeLinkState(value) {
   return String(value || '').trim().toUpperCase();
@@ -131,12 +134,14 @@ function buildWhatsAppSessionIdentity(channel = {}) {
 }
 
 function resolveWhatsAppAuthDir(authNamespace) {
-  const normalized = String(authNamespace || '')
-    .trim()
-    .replace(/^\/+/, '')
-    .replace(/\/{2,}/g, '/');
+  const normalizedSegments = String(authNamespace || '')
+    .split('/')
+    .map((segment) => segment.trim())
+    .filter(Boolean);
 
-  return normalized ? `auth/${normalized}` : null;
+  return normalizedSegments.length > 0
+    ? `${RUNTIME_WHATSAPP_AUTH_ROOT}/${normalizedSegments.join('/')}`
+    : null;
 }
 
 function buildWhatsAppGatewayAgentConfig(channel, agent) {
@@ -428,6 +433,10 @@ function sanitizeQrPayload(value) {
     copy.rawRuntimePayload = sanitizeQrPayload(copy.rawRuntimePayload);
   }
   return copy;
+}
+
+function logWhatsAppChannelLifecycle(stage, payload = {}) {
+  console.log(`[whatsapp-channel] ${stage}`, sanitizeQrPayload(payload));
 }
 
 function summarizeWhatsAppPayload(payload = {}) {
@@ -923,6 +932,16 @@ async function ensureWhatsAppLinkedState(channel, agent, runtime, force = false,
     });
   }
 
+  logWhatsAppChannelLifecycle('reconnect attempt', {
+    channelId: channel.id,
+    agentId: agent.id,
+    force,
+    forceFreshLogin: options.forceFreshLogin === true,
+    authNamespace: workingChannel.sessionData?.authNamespace || buildWhatsAppSessionIdentity(workingChannel).authNamespace,
+    runtimeSessionId: workingChannel.sessionData?.runtimeSessionId || buildWhatsAppSessionIdentity(workingChannel).runtimeSessionId,
+    adapterSessionId: workingChannel.sessionData?.adapterSessionId || buildWhatsAppSessionIdentity(workingChannel).adapterSessionId,
+  });
+
   if (options.forceFreshLogin === true) {
     console.log('[Fresh Login] Step 6: Create runtime session', {
       agentId: agent.id,
@@ -958,6 +977,14 @@ async function ensureWhatsAppLinkedState(channel, agent, runtime, force = false,
       qrGenerationStartedAt: null,
       adapterError: null,
       rawRuntimePayload: sanitizeQrPayload(initialSnapshot),
+    });
+
+    logWhatsAppChannelLifecycle('reconnect success', {
+      channelId: channel.id,
+      agentId: agent.id,
+      authNamespace: workingChannel.sessionData?.authNamespace || buildWhatsAppSessionIdentity(workingChannel).authNamespace,
+      connected: true,
+      statusMessage: 'WhatsApp berhasil terhubung dan siap dipakai.',
     });
 
     return {
@@ -1025,6 +1052,14 @@ async function ensureWhatsAppLinkedState(channel, agent, runtime, force = false,
         forceQrTriggered: false,
         qrGenerationStartedAt: null,
         rawRuntimePayload: sanitizeQrPayload(restoreSnapshot?.rawRuntimePayload || restoreSnapshot),
+      });
+
+      logWhatsAppChannelLifecycle('reconnect success', {
+        channelId: channel.id,
+        agentId: agent.id,
+        authNamespace: workingChannel.sessionData?.authNamespace || buildWhatsAppSessionIdentity(workingChannel).authNamespace,
+        connected: true,
+        statusMessage: 'WhatsApp berhasil diaktifkan kembali.',
       });
 
       return {
@@ -1115,6 +1150,14 @@ async function ensureWhatsAppLinkedState(channel, agent, runtime, force = false,
       loginResult = await ocStartWhatsAppLink(channel.id, buildLinkStartOptions(true), runtime);
       logWhatsAppDebug(logger, 'adapter-start-force-response', channel.id, loginResult, { force: true, reason: classified.code });
     } else {
+      logWhatsAppChannelLifecycle('reconnect failed', {
+        channelId: channel.id,
+        agentId: agent.id,
+        code: classified.code,
+        message: classified.userMessage,
+        authNamespace: workingChannel.sessionData?.authNamespace || buildWhatsAppSessionIdentity(workingChannel).authNamespace,
+      });
+
       const updatedChannel = await persistWhatsAppFailureState(workingChannel, classified, {
         reconnectStartedAt: workingChannel.sessionData?.reconnectStartedAt || reconnectStartedAt,
         reconnectElapsedMs: elapsedMsSince(workingChannel.sessionData?.reconnectStartedAt || reconnectStartedAt),
@@ -1231,6 +1274,16 @@ async function ensureWhatsAppLinkedState(channel, agent, runtime, force = false,
     snapshot: sanitizeQrPayload(snapshot),
   });
 
+  if (updated.status === 'CONNECTED' || snapshot?.connected === true || loginResult?.connected === true) {
+    logWhatsAppChannelLifecycle('reconnect success', {
+      channelId: channel.id,
+      agentId: agent.id,
+      authNamespace: updated.sessionData?.authNamespace || buildWhatsAppSessionIdentity(updated).authNamespace,
+      connected: true,
+      statusMessage: updated.sessionData?.statusMessage || loginResult?.message || null,
+    });
+  }
+
   return { channel: updated, snapshot, loginResult };
 }
 
@@ -1241,7 +1294,10 @@ export default async function channelRoute(fastify) {
     const targets = listCandidateAdapterUrls(channel.workspace).map((adapterUrl) => ({ adapterUrl }));
 
     for (const target of targets) {
-      await ocStopChannel(channel.id, channel.type, target)
+      await ocStopChannel(channel.id, channel.type, target, {
+        removeRegistration: true,
+        reason: 'user-request',
+      })
         .catch((err) => logger.warn({ err: err.message, channelId: channel.id }, 'ocStopChannel warning'));
     }
 
@@ -1663,6 +1719,15 @@ export default async function channelRoute(fastify) {
       });
     } catch (err) {
       const classified = channel.type === CHANNEL_TYPES.WHATSAPP ? classifyWhatsAppTransportFailure(err) : null;
+      if (channel.type === CHANNEL_TYPES.WHATSAPP && !err?.payload?.code) {
+        logWhatsAppChannelLifecycle('reconnect failed', {
+          channelId: channel.id,
+          agentId: channel.agentId,
+          code: classified?.code || null,
+          message: classified?.userMessage || err.message,
+          authNamespace: reconnectingChannel.sessionData?.authNamespace || buildWhatsAppSessionIdentity(reconnectingChannel).authNamespace,
+        });
+      }
       const failedChannel = channel.type === CHANNEL_TYPES.WHATSAPP
         ? await persistWhatsAppFailureState(reconnectingChannel, classified || classifyWhatsAppTransportFailure(err), {
             lastLinkMessage: classified?.userMessage || 'Gagal mengaktifkan kembali sesi WhatsApp.',
@@ -1816,6 +1881,15 @@ export default async function channelRoute(fastify) {
       }
 
       const classified = classifyWhatsAppTransportFailure(err);
+      if (!err?.payload?.code) {
+        logWhatsAppChannelLifecycle('reconnect failed', {
+          channelId: channel.id,
+          agentId: channel.agentId,
+          code: classified.code,
+          message: classified.userMessage || err.message,
+          authNamespace: workingChannel.sessionData?.authNamespace || buildWhatsAppSessionIdentity(workingChannel).authNamespace,
+        });
+      }
       const failedChannel = await persistWhatsAppFailureState(workingChannel, classified, {
         lastLinkMessage: classified.userMessage,
         adapterError: err?.payload?.adapterError || err?.message || null,

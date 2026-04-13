@@ -13,13 +13,26 @@
  */
 
 import { readFileSync, writeFileSync, cpSync, existsSync, mkdirSync, readdirSync, rmSync, mkdtempSync, chmodSync, statSync } from 'fs';
-import { join } from 'path';
+import { dirname, join } from 'path';
 import { homedir, tmpdir } from 'os';
 import Fastify from 'fastify';
 import unzipper from 'unzipper';
+import {
+  aiProviderConfig,
+  getOpenClawModelId,
+  getOpenClawModelRef,
+  getOpenClawProviderId,
+  getOptionalOpenClawModelId,
+  getOptionalOpenClawModelRef,
+  getOptionalOpenClawProviderId,
+  normalizeAiProviderError,
+  validateAiProviderConfig,
+} from './ai-provider-config.js';
 
 const OPENCLAW_HOME = process.env.OPENCLAW_HOME || join(homedir(), '.openclaw');
 const CREDENTIALS_DIR = process.env.OPENCLAW_OAUTH_DIR || join(OPENCLAW_HOME, 'credentials');
+const WHATSAPP_AUTH_ROOT = join(CREDENTIALS_DIR, 'whatsapp');
+const LEGACY_WHATSAPP_AUTH_ROOT = join(process.cwd(), 'auth');
 const BOOTSTRAP_OPENCLAW_HOME = process.env.OPENCLAW_BOOTSTRAP_HOME || join(homedir(), '.openclaw-bootstrap');
 const CONFIG_PATH = join(OPENCLAW_HOME, 'openclaw.json');
 const WORKSPACES_DIR = join(OPENCLAW_HOME, 'workspace');
@@ -29,6 +42,7 @@ const BOOTSTRAP_AGENTS_DIR = join(BOOTSTRAP_OPENCLAW_HOME, 'agents');
 const BOOTSTRAP_SKILLS_DEST = join(BOOTSTRAP_OPENCLAW_HOME, 'global-skills');
 const HOOKS_DEST = join(OPENCLAW_HOME, 'global-hooks');
 const PLUGINS_DEST = join(OPENCLAW_HOME, 'extensions');
+const CHANNEL_REGISTRATION_STORE_PATH = join(OPENCLAW_HOME, 'myagentclaw-channel-registrations.json');
 const SKILLS_SOURCE = join(process.cwd(), 'skills');
 const HOOKS_SOURCE = join(process.cwd(), 'hooks');
 const PLUGINS_SOURCE = join(process.cwd(), 'plugins');
@@ -38,6 +52,7 @@ const GATEWAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || '';
 const RESOLVED_GATEWAY_TOKEN = GATEWAY_TOKEN || process.env.INTERNAL_SECRET_KEY || '';
 const CLAWHUB_URL = (process.env.OPENCLAW_CLAWHUB_URL || process.env.CLAWHUB_URL || 'https://clawhub.ai').replace(/\/+$/, '');
 const CLAWHUB_DOWNLOAD_URL = (process.env.OPENCLAW_CLAWHUB_DOWNLOAD_URL || process.env.CLAWHUB_DOWNLOAD_URL || 'https://wry-manatee-359.convex.site').replace(/\/+$/, '');
+const OPENAI_CODEX_BASE_URL = 'https://chatgpt.com/backend-api';
 const INSTALL_METADATA_FILE = '.clawhub-install.json';
 const SHARED_WORKSPACE_FOLDER = 'shared-workspace';
 const SHARED_WORKSPACE_SYNC_MS = Math.max(1000, parseInt(process.env.MYAGENTCLAW_SHARED_WORKSPACE_SYNC_MS || '2000', 10) || 2000);
@@ -61,6 +76,58 @@ function getChannelLabel(channelType) {
   return normalizeChannelType(channelType) === 'WHATSAPP' ? 'WhatsApp' : 'Telegram';
 }
 
+function asPlainObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? { ...value } : {};
+}
+
+function isCustomerMessagingChannel(channelType) {
+  const normalizedType = normalizeChannelType(channelType);
+  return normalizedType === 'WHATSAPP' || normalizedType === 'TELEGRAM';
+}
+
+function buildAiProviderDefaultParams() {
+  return {
+    ...(aiProviderConfig.temperature !== undefined ? { temperature: aiProviderConfig.temperature } : {}),
+    ...(aiProviderConfig.topP !== undefined ? { topP: aiProviderConfig.topP } : {}),
+    ...(aiProviderConfig.maxTokens !== undefined ? { maxTokens: aiProviderConfig.maxTokens } : {}),
+    ...(aiProviderConfig.reasoning !== undefined ? { reasoningEffort: aiProviderConfig.reasoning } : {}),
+  };
+}
+
+function applyAiProviderDefaultParams(targetDefaults) {
+  const nextParams = buildAiProviderDefaultParams();
+  if (Object.keys(nextParams).length > 0) {
+    targetDefaults.params = nextParams;
+    return;
+  }
+
+  delete targetDefaults.params;
+}
+
+function buildCustomerChannelOutputContract(channelType) {
+  if (!isCustomerMessagingChannel(channelType)) {
+    return '';
+  }
+
+  return `## Aturan Output Channel Customer
+- Balasan HARUS langsung berupa jawaban final yang siap dikirim ke pelanggan.
+- Jangan pernah menulis reasoning, analisis, chain of thought, rencana jawaban, atau meta-komentar internal.
+- DILARANG menulis kalimat seperti "The user is asking", "I will respond", "Let me think", "Analysis", "Reasoning", "Step by step", atau variasi sejenis.
+- Jangan menjelaskan proses berpikir atau apa yang akan kamu lakukan. Langsung berikan jawaban final.
+- Jangan memakai heading internal, label reasoning, XML, JSON, atau code block kecuali user memang memintanya.
+- Jika jawaban tidak yakin, jawab singkat dan natural dalam Bahasa Indonesia tanpa membocorkan proses internal.`;
+}
+
+function buildFollowupSystemPrompt(channelType) {
+  const channelGuardrails = buildCustomerChannelOutputContract(channelType);
+  return [
+    'Kamu sedang menyiapkan pesan follow-up outbound untuk pelanggan.',
+    'Jangan panggil tools.',
+    'Kembalikan hanya teks final yang siap kirim atau NO_REPLY.',
+    channelGuardrails,
+  ].filter(Boolean).join('\n');
+}
+
 function safeStoreKey(value) {
   const raw = String(value || '').trim().toLowerCase();
   if (!raw) {
@@ -71,6 +138,150 @@ function safeStoreKey(value) {
 
 function resolveAllowFromStorePath(channelType, accountId) {
   return join(CREDENTIALS_DIR, `${safeStoreKey(getChannelKey(channelType))}-${safeStoreKey(accountId)}-allowFrom.json`);
+}
+
+function buildChannelRegistrationKey(channelId, channelType) {
+  return `${getChannelKey(channelType)}:${String(channelId || '').trim()}`;
+}
+
+function normalizeStoredCredentials(channelType, credentials = {}) {
+  const normalizedType = normalizeChannelType(channelType);
+  const source = asPlainObject(credentials);
+
+  if (normalizedType === 'TELEGRAM') {
+    return {
+      botToken: typeof source.botToken === 'string' ? source.botToken : '',
+    };
+  }
+
+  return {};
+}
+
+function normalizeStoredAgentConfig(agentConfig = {}) {
+  return asPlainObject(agentConfig);
+}
+
+function normalizeChannelRegistration(entry = {}) {
+  const channelId = String(entry.channelId || '').trim();
+  if (!channelId) {
+    return null;
+  }
+
+  const channelType = normalizeChannelType(entry.channelType || entry.type);
+  const agentConfig = normalizeStoredAgentConfig(entry.agentConfig);
+  const agentId = String(entry.agentId || agentConfig.agentId || channelId).trim() || channelId;
+
+  return {
+    channelId,
+    channelType,
+    credentials: normalizeStoredCredentials(channelType, entry.credentials),
+    agentId,
+    agentConfig,
+    enabled: entry.enabled !== false,
+    updatedAt: typeof entry.updatedAt === 'string' && entry.updatedAt.trim()
+      ? entry.updatedAt.trim()
+      : new Date().toISOString(),
+  };
+}
+
+function readChannelRegistrationStore() {
+  if (!existsSync(CHANNEL_REGISTRATION_STORE_PATH)) {
+    return { version: 1, registrations: [] };
+  }
+
+  try {
+    const parsed = JSON.parse(readFileSync(CHANNEL_REGISTRATION_STORE_PATH, 'utf8'));
+    const sourceRegistrations = Array.isArray(parsed?.registrations)
+      ? parsed.registrations
+      : Array.isArray(parsed)
+        ? parsed
+        : [];
+    const unique = new Map();
+
+    for (const entry of sourceRegistrations) {
+      const normalized = normalizeChannelRegistration(entry);
+      if (!normalized) {
+        continue;
+      }
+      unique.set(buildChannelRegistrationKey(normalized.channelId, normalized.channelType), normalized);
+    }
+
+    return {
+      version: 1,
+      registrations: [...unique.values()],
+    };
+  } catch (error) {
+    console.warn('[gateway-manager] failed reading channel registration store:', error?.message || error);
+    return { version: 1, registrations: [] };
+  }
+}
+
+function writeChannelRegistrationStore(store = { version: 1, registrations: [] }) {
+  mkdirSync(OPENCLAW_HOME, { recursive: true });
+  writeFileSync(
+    CHANNEL_REGISTRATION_STORE_PATH,
+    `${JSON.stringify({ version: 1, registrations: store.registrations || [] }, null, 2)}\n`,
+  );
+}
+
+function listChannelRegistrations() {
+  return readChannelRegistrationStore().registrations;
+}
+
+function upsertChannelRegistration(entry) {
+  const normalized = normalizeChannelRegistration(entry);
+  if (!normalized) {
+    throw new Error('channel registration tidak valid');
+  }
+
+  const store = readChannelRegistrationStore();
+  const key = buildChannelRegistrationKey(normalized.channelId, normalized.channelType);
+  const registrations = new Map(
+    store.registrations.map((registration) => [
+      buildChannelRegistrationKey(registration.channelId, registration.channelType),
+      registration,
+    ]),
+  );
+
+  registrations.set(key, {
+    ...normalized,
+    updatedAt: new Date().toISOString(),
+  });
+  writeChannelRegistrationStore({ version: 1, registrations: [...registrations.values()] });
+  return registrations.get(key);
+}
+
+function updateChannelRegistrationEnabled(channelId, channelType, enabled) {
+  const store = readChannelRegistrationStore();
+  const key = buildChannelRegistrationKey(channelId, channelType);
+  const registrations = new Map(
+    store.registrations.map((registration) => [
+      buildChannelRegistrationKey(registration.channelId, registration.channelType),
+      registration,
+    ]),
+  );
+  const existing = registrations.get(key);
+  if (!existing) {
+    return null;
+  }
+
+  const updated = {
+    ...existing,
+    enabled: enabled !== false,
+    updatedAt: new Date().toISOString(),
+  };
+  registrations.set(key, updated);
+  writeChannelRegistrationStore({ version: 1, registrations: [...registrations.values()] });
+  return updated;
+}
+
+function removeChannelRegistration(channelId, channelType) {
+  const store = readChannelRegistrationStore();
+  const key = buildChannelRegistrationKey(channelId, channelType);
+  const registrations = store.registrations.filter(
+    (registration) => buildChannelRegistrationKey(registration.channelId, registration.channelType) !== key,
+  );
+  writeChannelRegistrationStore({ version: 1, registrations });
 }
 
 const WHATSAPP_GATEWAY_ROUTE_CANDIDATES = Object.freeze({
@@ -123,23 +334,60 @@ function splitSafePathSegments(value) {
     .map((segment) => safeStoreKey(segment));
 }
 
+function buildWhatsAppAuthPathSegments(agentConfig = {}, channelId = '') {
+  const customSegments = splitSafePathSegments(agentConfig.whatsappAuthNamespace);
+  if (customSegments.length > 0) {
+    return customSegments;
+  }
+
+  const agentSegment = safeStoreKey(agentConfig.agentId || agentConfig.id || channelId || 'unassigned');
+  return [`agent-${agentSegment}`, 'whatsapp'];
+}
+
 function buildWhatsAppSessionIdentity(agentConfig = {}, channelId = '') {
   const agentSegment = safeStoreKey(agentConfig.agentId || agentConfig.id || channelId || 'unassigned');
 
   return {
-    authDir: join('auth', `agent-${agentSegment}`, 'whatsapp'),
+    authDir: join(WHATSAPP_AUTH_ROOT, `agent-${agentSegment}`, 'whatsapp'),
     runtimeSessionId: `runtime-agent-${agentSegment}-whatsapp`,
     adapterSessionId: `adapter-agent-${agentSegment}-whatsapp`,
   };
 }
 
 function resolveWhatsAppAuthDir(agentConfig = {}, channelId = '') {
-  const customSegments = splitSafePathSegments(agentConfig.whatsappAuthNamespace);
-  if (customSegments.length > 0) {
-    return join('auth', ...customSegments);
+  return join(WHATSAPP_AUTH_ROOT, ...buildWhatsAppAuthPathSegments(agentConfig, channelId));
+}
+
+function resolveLegacyWhatsAppAuthDir(agentConfig = {}, channelId = '') {
+  return join(LEGACY_WHATSAPP_AUTH_ROOT, ...buildWhatsAppAuthPathSegments(agentConfig, channelId));
+}
+
+function migrateLegacyWhatsAppAuthDir(agentConfig = {}, channelId = '', authDir = resolveWhatsAppAuthDir(agentConfig, channelId)) {
+  const legacyAuthDir = resolveLegacyWhatsAppAuthDir(agentConfig, channelId);
+  if (legacyAuthDir === authDir || existsSync(authDir) || !existsSync(legacyAuthDir)) {
+    return;
   }
 
-  return buildWhatsAppSessionIdentity(agentConfig, channelId).authDir;
+  try {
+    if (!statSync(legacyAuthDir).isDirectory()) {
+      return;
+    }
+
+    mkdirSync(dirname(authDir), { recursive: true });
+    cpSync(legacyAuthDir, authDir, { recursive: true });
+    console.log('[whatsapp-channel] migrated legacy auth dir', {
+      channelId,
+      from: legacyAuthDir,
+      to: authDir,
+    });
+  } catch (error) {
+    console.warn('[whatsapp-channel] failed migrating legacy auth dir', {
+      channelId,
+      from: legacyAuthDir,
+      to: authDir,
+      error: error?.message || error,
+    });
+  }
 }
 
 function normalizeApprovedCustomerEntry(channelType, value) {
@@ -222,20 +470,24 @@ function ensureChannelConfig(config, channelType) {
   return config.channels[channelKey];
 }
 
-function buildChannelAccountConfig(channelType, channelId, credentials = {}, agentConfig = {}) {
+function buildChannelAccountConfig(channelType, channelId, credentials = {}, agentConfig = {}, enabled = true) {
   const normalizedType = normalizeChannelType(channelType);
   const name = agentConfig.name || channelId;
 
   if (normalizedType === 'WHATSAPP') {
+    const authDir = resolveWhatsAppAuthDir(agentConfig, channelId);
+    migrateLegacyWhatsAppAuthDir(agentConfig, channelId, authDir);
+
     return {
       name,
-      enabled: true,
-      authDir: resolveWhatsAppAuthDir(agentConfig, channelId),
+      enabled: enabled !== false,
+      authDir,
     };
   }
 
   return {
     name,
+    enabled: enabled !== false,
     botToken: credentials.botToken,
     dmPolicy: 'open',
     allowFrom: ['*'],
@@ -611,6 +863,14 @@ function getHostnameFromUrl(value) {
   }
 }
 
+function resolveAgentTimeoutSeconds(value) {
+  const parsed = Number.parseInt(String(value ?? ''), 10);
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return parsed;
+  }
+  return 180;
+}
+
 function ensureAllowedHostname(config, hostname) {
   if (!hostname) return;
 
@@ -900,9 +1160,7 @@ function normalizeAssignedSkills(openclawSkill) {
 
 function normalizeModelName(value) {
   const raw = String(value || '').trim();
-  if (!raw) return 'openai-codex/gpt-5.4';
-  if (raw.includes('/')) return raw;
-  return `openai/${raw}`;
+  return getOpenClawModelRef(raw || aiProviderConfig.model);
 }
 
 function readJsonFile(filePath, fallback = null) {
@@ -935,8 +1193,108 @@ function findProviderBootstrapDir(provider, currentAgentId) {
   return null;
 }
 
+function sanitizeAgentModelsStore(store = {}) {
+  const activeProviderIds = getConfiguredProviderIds();
+  const nextProviders = Object.fromEntries(
+    Object.entries(store.providers || {}).filter(([providerId]) => activeProviderIds.has(providerId)),
+  );
+
+  return {
+    ...store,
+    providers: nextProviders,
+  };
+}
+
+function sanitizeAgentAuthStore(store = {}) {
+  const activeProviderIds = getConfiguredProviderIds();
+  const profiles = Object.fromEntries(
+    Object.entries(store.profiles || {}).filter(([, profile]) => activeProviderIds.has(String(profile?.provider || '').trim().toLowerCase())),
+  );
+  const validProfileIds = new Set(Object.keys(profiles));
+  const lastGood = Object.fromEntries(
+    Object.entries(store.lastGood || {}).filter(([providerId, profileId]) => activeProviderIds.has(providerId) && validProfileIds.has(profileId)),
+  );
+  const lastUsedProfileByModel = Object.fromEntries(
+    Object.entries(store.lastUsedProfileByModel || {}).filter(([, profileId]) => validProfileIds.has(profileId)),
+  );
+  const usageStats = Object.fromEntries(
+    Object.entries(store.usageStats || {}).filter(([profileId]) => validProfileIds.has(profileId)),
+  );
+  const selectedProfileId = validProfileIds.has(store.selectedProfileId) ? store.selectedProfileId : undefined;
+
+  return {
+    version: store.version || 1,
+    profiles,
+    ...(selectedProfileId ? { selectedProfileId } : {}),
+    lastUsedProfileByModel,
+    lastGood,
+    usageStats,
+  };
+}
+
+function writeJsonFileIfChanged(filePath, nextStore, fallback = {}) {
+  const currentStore = readJsonFile(filePath, fallback) || fallback;
+  const currentSerialized = JSON.stringify(currentStore);
+  const nextSerialized = JSON.stringify(nextStore);
+  if (currentSerialized === nextSerialized) {
+    return false;
+  }
+
+  writeFileSync(filePath, `${JSON.stringify(nextStore, null, 2)}\n`);
+  return true;
+}
+
+function pruneInactiveProviderModels(agentDir) {
+  const modelsPath = join(agentDir, 'models.json');
+  if (!existsSync(modelsPath)) {
+    return false;
+  }
+
+  const existingStore = readJsonFile(modelsPath, {}) || {};
+  const nextStore = sanitizeAgentModelsStore(existingStore);
+  return writeJsonFileIfChanged(modelsPath, nextStore, {});
+}
+
+function pruneInactiveProviderAuthProfiles(agentDir) {
+  const authProfilesPath = join(agentDir, 'auth-profiles.json');
+  if (!existsSync(authProfilesPath)) {
+    return false;
+  }
+
+  const existingStore = readJsonFile(authProfilesPath, {}) || {};
+  const nextStore = sanitizeAgentAuthStore(existingStore);
+  return writeJsonFileIfChanged(authProfilesPath, nextStore, {});
+}
+
 function hasProviderMode(authStore, provider, mode) {
   return Object.values(authStore?.profiles || {}).some((profile) => profile?.provider === provider && (profile?.mode || profile?.type) === mode);
+}
+
+function seedProviderModelsFromEnv(agentDir, provider) {
+  const normalizedProvider = String(provider || '').trim().toLowerCase();
+  const providerConfigBuilders = {
+    openai: buildOpenAiProviderConfig,
+    'openai-codex': buildOpenAiCodexProviderConfig,
+  };
+  const buildProviderConfig = providerConfigBuilders[normalizedProvider];
+
+  if (!buildProviderConfig) {
+    return false;
+  }
+
+  const modelsPath = join(agentDir, 'models.json');
+  const existingStore = readJsonFile(modelsPath, {}) || {};
+  const existingProviderConfig = existingStore.providers?.[normalizedProvider] || {};
+  const nextStore = sanitizeAgentModelsStore({
+    ...existingStore,
+    providers: {
+      ...(existingStore.providers || {}),
+      [normalizedProvider]: buildProviderConfig(existingProviderConfig),
+    },
+  });
+
+  writeFileSync(modelsPath, `${JSON.stringify(nextStore, null, 2)}\n`);
+  return true;
 }
 
 function bootstrapProviderState(agentId, provider) {
@@ -945,13 +1303,21 @@ function bootstrapProviderState(agentId, provider) {
 
   const sourceDir = findProviderBootstrapDir(provider, agentId);
   if (!sourceDir) {
-    return seedProviderAuthProfileFromEnv(targetDir, provider);
+    const seededAuth = seedProviderAuthProfileFromEnv(targetDir, provider);
+    const seededModels = seedProviderModelsFromEnv(targetDir, provider);
+    const prunedAuth = pruneInactiveProviderAuthProfiles(targetDir);
+    const prunedModels = pruneInactiveProviderModels(targetDir);
+    return seededAuth || seededModels || prunedAuth || prunedModels;
   }
 
   for (const fileName of ['auth-profiles.json', 'models.json']) {
     const sourcePath = join(sourceDir, fileName);
     const targetPath = join(targetDir, fileName);
     if (!existsSync(sourcePath)) continue;
+
+    if (fileName === 'models.json') {
+      continue;
+    }
 
     let shouldCopy = !existsSync(targetPath);
     if (fileName === 'auth-profiles.json' && existsSync(targetPath)) {
@@ -965,7 +1331,11 @@ function bootstrapProviderState(agentId, provider) {
     }
   }
 
-  return true;
+  seedProviderModelsFromEnv(targetDir, provider);
+  const prunedAuth = pruneInactiveProviderAuthProfiles(targetDir);
+  const prunedModels = pruneInactiveProviderModels(targetDir);
+
+  return prunedAuth || prunedModels || true;
 }
 
 function seedMissingDirectoryEntries(sourceDir, destinationDir) {
@@ -984,10 +1354,9 @@ function seedMissingDirectoryEntries(sourceDir, destinationDir) {
 function resolveProviderApiKeyEnvVar(provider) {
   switch (String(provider || '').trim().toLowerCase()) {
     case 'openai':
-    case 'openai-codex':
       return 'OPENAI_API_KEY';
-    case 'anthropic':
-      return 'ANTHROPIC_API_KEY';
+    case 'openai-codex':
+      return 'OPENAI_OAUTH_TOKEN';
     default:
       return null;
   }
@@ -1003,10 +1372,30 @@ function seedProviderAuthProfileFromEnv(agentDir, provider) {
   const existingStore = readJsonFile(authProfilesPath, {}) || {};
   const normalizedProvider = String(provider || '').trim().toLowerCase();
   const profileId = `${normalizedProvider}:default`;
-  const profiles = {
-    ...(existingStore.profiles || {}),
-    [profileId]: {
-      ...(existingStore.profiles?.[profileId] || {}),
+  const existingProfile = existingStore.profiles?.[profileId] || {};
+
+  if (
+    normalizedProvider === 'openai-codex'
+    && existingProfile.type === 'oauth'
+    && existingProfile.access
+    && existingProfile.refresh
+  ) {
+    return false;
+  }
+
+  const nextProfile = normalizedProvider === 'openai-codex'
+    ? {
+      ...existingProfile,
+      type: 'token',
+      provider: normalizedProvider,
+      tokenRef: {
+        source: 'env',
+        provider: 'default',
+        id: envVar,
+      },
+    }
+    : {
+      ...existingProfile,
       type: 'api_key',
       provider: normalizedProvider,
       keyRef: {
@@ -1014,7 +1403,19 @@ function seedProviderAuthProfileFromEnv(agentDir, provider) {
         provider: 'default',
         id: envVar,
       },
-    },
+    };
+
+  if (normalizedProvider === 'openai-codex') {
+    delete nextProfile.key;
+    delete nextProfile.keyRef;
+  } else {
+    delete nextProfile.token;
+    delete nextProfile.tokenRef;
+  }
+
+  const profiles = {
+    ...(existingStore.profiles || {}),
+    [profileId]: nextProfile,
   };
 
   const authStore = {
@@ -1025,7 +1426,7 @@ function seedProviderAuthProfileFromEnv(agentDir, provider) {
     usageStats: existingStore.usageStats || {},
   };
 
-  writeFileSync(authProfilesPath, `${JSON.stringify(authStore, null, 2)}\n`);
+  writeFileSync(authProfilesPath, `${JSON.stringify(sanitizeAgentAuthStore(authStore), null, 2)}\n`);
   return true;
 }
 
@@ -1457,11 +1858,11 @@ function isProviderErrorMessage(message = '') {
   if (!normalized) return false;
 
   return [
-    'you exceeded your current quota',
-    'check your plan and billing details',
-    'platform.openai.com/docs/guides/error-codes',
+    'invalid api key',
     'rate limit',
-    'api_error',
+    'model not found',
+    'timed out',
+    'timeout',
   ].some((fragment) => normalized.includes(fragment));
 }
 
@@ -1499,17 +1900,141 @@ function sanitizeRuntimeConfig(config = {}) {
   return config;
 }
 
+function buildConfiguredProviderModels(providerId, existingModels = []) {
+  const normalizedProviderId = String(providerId || '').trim().toLowerCase();
+  const normalizedExistingModels = Array.isArray(existingModels) ? existingModels : [];
+  const textModelRef = getOpenClawModelRef(aiProviderConfig.model);
+  const textProviderId = getOpenClawProviderId(textModelRef);
+  const imageModelRef = getOptionalOpenClawModelRef(aiProviderConfig.imageModel);
+  const imageProviderId = getOptionalOpenClawProviderId(imageModelRef);
+  const desiredModelMap = new Map();
+  for (const entry of [
+    ...(textProviderId === normalizedProviderId
+      ? [{ id: getOpenClawModelId(textModelRef), input: ['text'] }]
+      : []),
+    ...(imageModelRef && imageProviderId === normalizedProviderId
+      ? [{ id: getOptionalOpenClawModelId(imageModelRef), input: ['text', 'image'] }]
+      : []),
+  ]) {
+    const existingEntry = desiredModelMap.get(entry.id);
+    if (existingEntry) {
+      existingEntry.input = Array.from(new Set([...existingEntry.input, ...entry.input]));
+      continue;
+    }
+
+    desiredModelMap.set(entry.id, {
+      id: entry.id,
+      input: [...entry.input],
+    });
+  }
+  const desiredModels = [...desiredModelMap.values()];
+  const seenDesiredIds = new Set();
+
+  const mergedModels = normalizedExistingModels.map((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      return entry;
+    }
+
+    const entryId = String(entry.id || '').trim();
+    const desiredEntry = desiredModels.find((model) => model.id === entryId);
+    if (!desiredEntry) {
+      return entry;
+    }
+
+    seenDesiredIds.add(entryId);
+
+    return {
+      ...entry,
+      id: desiredEntry.id,
+      name: entry.name || desiredEntry.id,
+      input: [...desiredEntry.input],
+    };
+  });
+
+  for (const desiredEntry of desiredModels) {
+    if (seenDesiredIds.has(desiredEntry.id)) {
+      continue;
+    }
+
+    mergedModels.unshift({
+      id: desiredEntry.id,
+      name: desiredEntry.id,
+      input: desiredEntry.input,
+    });
+  }
+
+  return mergedModels;
+}
+
+function getConfiguredProviderIds() {
+  const providers = new Set([getOpenClawProviderId(aiProviderConfig.model)]);
+  const imageProviderId = getOptionalOpenClawProviderId(aiProviderConfig.imageModel);
+  if (imageProviderId) {
+    providers.add(imageProviderId);
+  }
+
+  return providers;
+}
+
+function buildOpenAiProviderConfig(existingProviderConfig = {}) {
+  return {
+    ...existingProviderConfig,
+    baseUrl: aiProviderConfig.baseURL,
+    apiKey: { source: 'env', provider: 'default', id: 'OPENAI_API_KEY' },
+    api: 'openai-completions',
+    models: buildConfiguredProviderModels('openai', existingProviderConfig.models),
+  };
+}
+
+function buildOpenAiCodexProviderConfig(existingProviderConfig = {}) {
+  const nextProviderConfig = {
+    ...existingProviderConfig,
+    baseUrl: OPENAI_CODEX_BASE_URL,
+    api: 'openai-codex-responses',
+    models: buildConfiguredProviderModels('openai-codex', existingProviderConfig.models),
+  };
+
+  delete nextProviderConfig.apiKey;
+
+  return nextProviderConfig;
+}
+
+function applyAiProviderConfig(config = {}) {
+  if (!config.models) config.models = {};
+  if (!config.models.providers) config.models.providers = {};
+
+  const activeProviderIds = getConfiguredProviderIds();
+  const nextProviders = {};
+
+  if (activeProviderIds.has('openai')) {
+    nextProviders.openai = buildOpenAiProviderConfig(config.models.providers.openai || {});
+  }
+
+  if (activeProviderIds.has('openai-codex')) {
+    nextProviders['openai-codex'] = buildOpenAiCodexProviderConfig(config.models.providers['openai-codex'] || {});
+  }
+
+  config.models.providers = nextProviders;
+
+  return config;
+}
+
 function buildBaseConfig() {
   const internalKey = process.env.INTERNAL_SECRET_KEY || '';
   const backendUrl  = process.env.BACKEND_INTERNAL_URL || 'http://backend:3001';
   const backendHostname = getHostnameFromUrl(backendUrl);
-  const model       = normalizeModelName(process.env.DEFAULT_LLM_MODEL || 'openai-codex/gpt-5.4');
+  const model       = getOpenClawModelRef(aiProviderConfig.model);
+  const imageModel  = getOptionalOpenClawModelRef(aiProviderConfig.imageModel);
+  const timeoutSeconds = resolveAgentTimeoutSeconds();
   const sandboxMode = resolveSandboxMode();
 
   const config = {
     agents: {
       defaults: {
         model,
+        ...(imageModel ? { imageModel } : {}),
+        timeoutSeconds,
+        params: buildAiProviderDefaultParams(),
         skipBootstrap: false,
         sandbox: { mode: sandboxMode },
       },
@@ -1531,6 +2056,9 @@ function buildBaseConfig() {
       },
     },
     bindings: [],
+    models: {
+      providers: {},
+    },
     tools: {
       fs: { workspaceOnly: true },
     },
@@ -1582,10 +2110,185 @@ function buildBaseConfig() {
   };
 
   applyTierToolPolicy(config, normalizeTier());
+  applyAiProviderConfig(config);
 
   ensureAllowedHostname(config, backendHostname);
 
   return config;
+}
+
+function applyChannelRegistration(config, entry = {}) {
+  const registration = normalizeChannelRegistration(entry);
+  if (!registration) {
+    throw new Error('channel registration tidak valid');
+  }
+
+  const {
+    channelId,
+    channelType,
+    credentials,
+    agentId,
+    agentConfig,
+    enabled,
+  } = registration;
+  const agentModel = getOpenClawModelRef(aiProviderConfig.model);
+  const agentImageModel = getOptionalOpenClawModelRef(aiProviderConfig.imageModel);
+  const agentTimeoutSeconds = resolveAgentTimeoutSeconds(agentConfig.timeoutSeconds);
+  const sandboxMode = resolveSandboxMode(agentConfig.sandboxMode);
+  const resolvedAgentId = String(agentId || agentConfig.agentId || channelId);
+  const workspaceKey = String(agentConfig.privateWorkspaceKey || resolvedAgentId || channelId);
+  const runtimeTier = normalizeTier(agentConfig.subTier);
+  const normalizedType = normalizeChannelType(channelType);
+  const channelKey = getChannelKey(normalizedType);
+  const sharedWorkspaceAccess = normalizeSharedWorkspaceAccess(agentConfig.sharedWorkspaceAccess, {
+    enabled: runtimeTier !== 'FREE' && agentConfig.hasSharedWorkspace !== false,
+  });
+
+  ensureChannelConfig(config, normalizedType);
+  if (!config.agents) {
+    config.agents = {
+      defaults: {
+        model: agentModel,
+        ...(agentImageModel ? { imageModel: agentImageModel } : {}),
+        timeoutSeconds: agentTimeoutSeconds,
+        params: buildAiProviderDefaultParams(),
+      },
+      list: [],
+    };
+  }
+  if (!config.agents.list) config.agents.list = [];
+  if (!config.bindings) config.bindings = [];
+  applyAiProviderConfig(config);
+  config.agents.defaults = config.agents.defaults || {};
+  config.agents.defaults.model = agentModel;
+  if (agentImageModel) {
+    config.agents.defaults.imageModel = agentImageModel;
+  } else {
+    delete config.agents.defaults.imageModel;
+  }
+  config.agents.defaults.timeoutSeconds = resolveAgentTimeoutSeconds(config.agents.defaults.timeoutSeconds);
+  applyAiProviderDefaultParams(config.agents.defaults);
+
+  const workspaceDir = join(WORKSPACES_DIR, workspaceKey);
+  const provider = getOpenClawProviderId(agentModel);
+
+  config.channels[channelKey].accounts[channelId] = buildChannelAccountConfig(
+    normalizedType,
+    channelId,
+    credentials,
+    agentConfig,
+    enabled,
+  );
+
+  const assignedSkills = normalizeAssignedSkills(agentConfig.assignedSkills ?? agentConfig.openclawSkill);
+  const existingAgent = config.agents.list.find((agent) => agent.id === resolvedAgentId);
+  const agentTools = buildAgentToolPolicy({ ...agentConfig, subTier: runtimeTier });
+
+  if (!existingAgent) {
+    config.agents.list.push({
+      id: resolvedAgentId,
+      name: agentConfig.name || resolvedAgentId,
+      model: agentModel,
+      workspace: workspaceDir,
+      sandbox: { mode: sandboxMode },
+      tools: agentTools,
+      ...(assignedSkills ? { skills: assignedSkills } : {}),
+    });
+  } else {
+    existingAgent.name = agentConfig.name || existingAgent.name || resolvedAgentId;
+    existingAgent.model = agentModel;
+    existingAgent.workspace = workspaceDir;
+    existingAgent.sandbox = {
+      ...(existingAgent.sandbox || {}),
+      mode: sandboxMode,
+    };
+    existingAgent.tools = agentTools;
+    delete existingAgent.timeoutSeconds;
+    if (assignedSkills) {
+      existingAgent.skills = assignedSkills;
+    } else {
+      delete existingAgent.skills;
+    }
+  }
+
+  const existingBinding = config.bindings.find((binding) => binding.match?.channel === channelKey && binding.match?.accountId === channelId);
+  if (!existingBinding) {
+    config.bindings.push({ match: { channel: channelKey, accountId: channelId }, agentId: resolvedAgentId });
+  } else if (existingBinding.agentId !== resolvedAgentId) {
+    const previousAgentId = existingBinding.agentId;
+    existingBinding.agentId = resolvedAgentId;
+
+    const oldAgentStillBound = config.bindings.some((binding) => binding.agentId === previousAgentId);
+    if (!oldAgentStillBound && config.agents?.list) {
+      config.agents.list = config.agents.list.filter((agent) => agent.id !== previousAgentId);
+    }
+  }
+
+  mkdirSync(workspaceDir, { recursive: true });
+  attachSharedWorkspaceProjection({
+    agentId: resolvedAgentId,
+    workspaceDir,
+    ownerKey: resolveSharedWorkspaceOwnerKey(agentConfig),
+    canonicalDir: resolveSharedWorkspaceCanonicalDir(agentConfig),
+    access: sharedWorkspaceAccess,
+  });
+  writeFileSync(join(workspaceDir, 'AGENTS.md'), buildAgentsMd(channelId, {
+    ...agentConfig,
+    agentId: resolvedAgentId,
+    channelType: normalizedType,
+    sharedWorkspaceAccess,
+    sharedWorkspaceFolder: SHARED_WORKSPACE_FOLDER,
+  }));
+
+  if (provider === 'openai' || provider === 'openai-codex') {
+    const bootstrapped = bootstrapProviderState(resolvedAgentId, provider);
+    if (!bootstrapped) {
+      console.warn(`[gateway-manager] ${provider} provider auth bootstrap not found for ${resolvedAgentId}`);
+    }
+  }
+
+  syncDefaultChannelAccount(config, normalizedType);
+
+  return {
+    channelId,
+    channelType: normalizedType,
+    agentId: resolvedAgentId,
+    enabled: enabled !== false,
+    authDir: config.channels?.[channelKey]?.accounts?.[channelId]?.authDir || null,
+  };
+}
+
+function restoreStoredChannelRegistrations(config) {
+  const registrations = listChannelRegistrations();
+
+  for (const registration of registrations) {
+    try {
+      const normalizedType = normalizeChannelType(registration.channelType);
+      if (normalizedType === 'WHATSAPP' && registration.enabled !== false) {
+        console.log('[whatsapp-channel] restoring saved session', {
+          channelId: registration.channelId,
+          agentId: registration.agentId,
+          authDir: resolveWhatsAppAuthDir(registration.agentConfig || {}, registration.channelId),
+        });
+      }
+
+      const applied = applyChannelRegistration(config, registration);
+
+      if (normalizedType === 'WHATSAPP' && registration.enabled !== false) {
+        console.log('[whatsapp-channel] restored successfully', {
+          channelId: applied.channelId,
+          agentId: applied.agentId,
+          authDir: applied.authDir,
+        });
+      }
+    } catch (error) {
+      console.warn('[gateway-manager] failed restoring channel registration', {
+        channelId: registration.channelId,
+        channelType: registration.channelType,
+        error: error?.message || error,
+      });
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1622,25 +2325,44 @@ function setup() {
   const internalKey = process.env.INTERNAL_SECRET_KEY || '';
   const backendUrl  = process.env.BACKEND_INTERNAL_URL || 'http://backend:3001';
   const backendHostname = getHostnameFromUrl(backendUrl);
-  const defaultModel = normalizeModelName(process.env.DEFAULT_LLM_MODEL || 'openai-codex/gpt-5.4');
+  const defaultModel = getOpenClawModelRef(aiProviderConfig.model);
+  const defaultImageModel = getOptionalOpenClawModelRef(aiProviderConfig.imageModel);
+  const defaultTimeoutSeconds = resolveAgentTimeoutSeconds();
   const sandboxMode = resolveSandboxMode();
 
   if (!config.agents) config.agents = {};
   if (!config.agents.defaults) config.agents.defaults = {};
   config.agents.defaults.model = defaultModel;
+  if (defaultImageModel) {
+    config.agents.defaults.imageModel = defaultImageModel;
+  } else {
+    delete config.agents.defaults.imageModel;
+  }
+  config.agents.defaults.timeoutSeconds = defaultTimeoutSeconds;
+  applyAiProviderDefaultParams(config.agents.defaults);
   config.agents.defaults.sandbox = {
     ...(config.agents.defaults.sandbox || {}),
     mode: sandboxMode,
   };
   if (Array.isArray(config.agents.list)) {
-    config.agents.list = config.agents.list.map((agent) => ({
-      ...agent,
-      sandbox: {
-        ...(agent?.sandbox || {}),
-        mode: sandboxMode,
-      },
-    }));
+    config.agents.list = config.agents.list.map((agent) => {
+      const {
+        timeoutSeconds: _legacyTimeoutSeconds,
+        ...normalizedAgent
+      } = agent || {};
+
+      return {
+        ...normalizedAgent,
+        model: defaultModel,
+        sandbox: {
+          ...(normalizedAgent?.sandbox || {}),
+          mode: sandboxMode,
+        },
+      };
+    });
   }
+
+  applyAiProviderConfig(config);
 
   // Update env di semua skill entries
   if (config.skills?.entries) {
@@ -1733,6 +2455,7 @@ function setup() {
 
   ensureChannelConfig(config, 'TELEGRAM');
   ensureChannelConfig(config, 'WHATSAPP');
+  restoreStoredChannelRegistrations(config);
   syncDefaultChannelAccount(config, 'TELEGRAM');
   syncDefaultChannelAccount(config, 'WHATSAPP');
 
@@ -1745,118 +2468,49 @@ function setup() {
 // ---------------------------------------------------------------------------
 
 function registerChannel(channelId, channelType, credentials = {}, agentId, agentConfig = {}) {
-  const config = readConfig();
-  const agentModel = normalizeModelName(agentConfig.llmModel || config.agents?.defaults?.model || 'openai-codex/gpt-5.4');
-  const sandboxMode = resolveSandboxMode(agentConfig.sandboxMode);
-  const resolvedAgentId = String(agentId || agentConfig.agentId || channelId);
-  const workspaceKey = String(agentConfig.privateWorkspaceKey || resolvedAgentId || channelId);
-  const runtimeTier = normalizeTier(agentConfig.subTier);
-  const normalizedType = normalizeChannelType(channelType);
-  const channelKey = getChannelKey(normalizedType);
-  const sharedWorkspaceAccess = normalizeSharedWorkspaceAccess(agentConfig.sharedWorkspaceAccess, {
-    enabled: runtimeTier !== 'FREE' && agentConfig.hasSharedWorkspace !== false,
-  });
-
-  // Ensure structures exist
-  ensureChannelConfig(config, normalizedType);
-  if (!config.agents) config.agents = { defaults: { model: 'openai-codex/gpt-5.4' }, list: [] };
-  if (!config.agents.list) config.agents.list = [];
-  if (!config.bindings) config.bindings = [];
-
-  const workspaceDir = join(WORKSPACES_DIR, workspaceKey);
-  const provider = agentModel.split('/')[0] || '';
-
-  config.channels[channelKey].accounts[channelId] = buildChannelAccountConfig(
-    normalizedType,
+  const registration = upsertChannelRegistration({
     channelId,
+    channelType,
     credentials,
+    agentId,
     agentConfig,
-  );
-
-  const assignedSkills = normalizeAssignedSkills(agentConfig.assignedSkills ?? agentConfig.openclawSkill);
-  const existingAgent = config.agents.list.find((a) => a.id === resolvedAgentId);
-  const agentTools = buildAgentToolPolicy({ ...agentConfig, subTier: runtimeTier });
-
-  // Tambah agent ke list jika belum ada
-  if (!existingAgent) {
-    config.agents.list.push({
-      id: resolvedAgentId,
-      name: agentConfig.name || resolvedAgentId,
-      model: agentModel,
-      workspace: workspaceDir,
-      sandbox: { mode: sandboxMode },
-      tools: agentTools,
-      ...(assignedSkills ? { skills: assignedSkills } : {}),
-    });
-  } else {
-    existingAgent.name = agentConfig.name || existingAgent.name || resolvedAgentId;
-    existingAgent.model = agentModel;
-    existingAgent.workspace = workspaceDir;
-    existingAgent.sandbox = {
-      ...(existingAgent.sandbox || {}),
-      mode: sandboxMode,
-    };
-    existingAgent.tools = agentTools;
-    if (assignedSkills) {
-      existingAgent.skills = assignedSkills;
-    } else {
-      delete existingAgent.skills;
-    }
-  }
-
-  // Tambah atau perbarui binding channel -> agent stabil
-  const existingBinding = config.bindings.find((b) => b.match?.channel === channelKey && b.match?.accountId === channelId);
-  if (!existingBinding) {
-    config.bindings.push({ match: { channel: channelKey, accountId: channelId }, agentId: resolvedAgentId });
-  } else if (existingBinding.agentId !== resolvedAgentId) {
-    const previousAgentId = existingBinding.agentId;
-    existingBinding.agentId = resolvedAgentId;
-
-    const oldAgentStillBound = config.bindings.some((binding) => binding.agentId === previousAgentId);
-    if (!oldAgentStillBound && config.agents?.list) {
-      config.agents.list = config.agents.list.filter((agent) => agent.id !== previousAgentId);
-    }
-  }
-
-  // Buat workspace dir + AGENTS.md dengan persona agent
-  mkdirSync(workspaceDir, { recursive: true });
-  attachSharedWorkspaceProjection({
-    agentId: resolvedAgentId,
-    workspaceDir,
-    ownerKey: resolveSharedWorkspaceOwnerKey(agentConfig),
-    canonicalDir: resolveSharedWorkspaceCanonicalDir(agentConfig),
-    access: sharedWorkspaceAccess,
+    enabled: true,
   });
-  writeFileSync(join(workspaceDir, 'AGENTS.md'), buildAgentsMd(channelId, {
-    ...agentConfig,
-    agentId: resolvedAgentId,
-    channelType: normalizedType,
-    sharedWorkspaceAccess,
-    sharedWorkspaceFolder: SHARED_WORKSPACE_FOLDER,
-  }));
-
-  if (provider === 'openai-codex') {
-    const bootstrapped = bootstrapProviderState(resolvedAgentId, provider);
-    if (!bootstrapped) {
-      console.warn(`[gateway-manager] Codex auth bootstrap not found for ${resolvedAgentId}`);
-    }
-  }
-
-  syncDefaultChannelAccount(config, normalizedType);
+  const config = readConfig();
+  const applied = applyChannelRegistration(config, registration);
   saveConfig(config);
-  console.log(`[gateway-manager] ${getChannelLabel(normalizedType)} channel registered: ${channelId}`);
+  console.log(`[gateway-manager] ${getChannelLabel(applied.channelType)} channel registered: ${channelId}`);
 }
 
 function registerBot(channelId, botToken, agentId, agentConfig = {}) {
   return registerChannel(channelId, 'TELEGRAM', { botToken }, agentId, agentConfig);
 }
 
-function unregisterChannel(channelId, channelType = 'TELEGRAM') {
+function unregisterChannel(channelId, channelType = 'TELEGRAM', options = {}) {
   const config = readConfig();
   const normalizedType = normalizeChannelType(channelType);
   const channelKey = getChannelKey(normalizedType);
+  const removeRegistration = options.removeRegistration === true;
+  const reason = typeof options.reason === 'string' && options.reason.trim()
+    ? options.reason.trim()
+    : (removeRegistration ? 'user-request' : 'runtime-stop');
   const bindings = Array.isArray(config.bindings) ? config.bindings : [];
   const boundAgentId = bindings.find((b) => b.match?.channel === channelKey && b.match?.accountId === channelId)?.agentId;
+
+  if (!removeRegistration) {
+    updateChannelRegistrationEnabled(channelId, normalizedType, false);
+    if (config.channels?.[channelKey]?.accounts?.[channelId]) {
+      config.channels[channelKey].accounts[channelId] = {
+        ...config.channels[channelKey].accounts[channelId],
+        enabled: false,
+      };
+    }
+    saveConfig(config);
+    console.log(`[gateway-manager] ${getChannelLabel(normalizedType)} channel stopped: ${channelId} (${reason})`);
+    return;
+  }
+
+  removeChannelRegistration(channelId, normalizedType);
 
   if (boundAgentId) {
     detachSharedWorkspaceProjection(boundAgentId);
@@ -1881,6 +2535,13 @@ function unregisterChannel(channelId, channelType = 'TELEGRAM') {
   syncDefaultChannelAccount(config, normalizedType);
   saveConfig(config);
   console.log(`[gateway-manager] ${getChannelLabel(normalizedType)} channel unregistered: ${channelId}`);
+
+  if (normalizedType === 'WHATSAPP' && reason === 'user-request') {
+    console.log('[whatsapp-channel] unregistered by user', {
+      channelId,
+      agentId: boundAgentId || null,
+    });
+  }
 }
 
 function unregisterBot(channelId) {
@@ -1917,6 +2578,7 @@ function buildAgentsMd(channelId, cfg = {}) {
   const skillsLabel = normalizedSkills.map((skill) => `**${skill}**`).join(', ');
   const assignedSkillPrompt = loadAssignedSkillPrompts(normalizedSkills);
   const customSystemPrompt = String(systemPrompt || '').trim();
+  const channelOutputContract = buildCustomerChannelOutputContract(channelType);
 
   return `# ${name} — ${role}
 
@@ -1937,6 +2599,10 @@ ${tone}
 
 ## Bahasa
 Gunakan Bahasa Indonesia secara default, tetapi ikuti bahasa user bila berbeda.
+
+${channelOutputContract ? `${channelOutputContract}
+
+` : ''}
 
 ${normalizedSkills.length > 0 ? `## Skill Aktif
 Skill yang aktif untuk agent ini adalah ${skillsLabel}. Gunakan skill yang paling relevan dengan kebutuhan user, dan Anda boleh memakai lebih dari satu skill bila memang membantu.
@@ -2222,10 +2888,13 @@ async function startAdapterApi() {
   });
 
   api.post('/bots/stop', async (req, reply) => {
-    const { channelId, type } = req.body || {};
+    const { channelId, type, removeRegistration, reason } = req.body || {};
     if (!channelId) return reply.code(400).send({ error: 'channelId diperlukan' });
     try {
-      unregisterChannel(channelId, type || 'TELEGRAM');
+      unregisterChannel(channelId, type || 'TELEGRAM', {
+        removeRegistration: removeRegistration === true,
+        reason,
+      });
       return { ok: true, channelId };
     } catch (err) {
       console.error('[gateway-manager] unregisterChannel error:', err);
@@ -2309,31 +2978,37 @@ async function startAdapterApi() {
 
     try {
       const normalizedType = normalizeChannelType(channelType);
+      const messages = [
+        {
+          role: 'system',
+          content: buildFollowupSystemPrompt(normalizedType),
+        },
+        {
+          role: 'user',
+          content: buildFollowupPrompt({
+            customerName,
+            customerPhone,
+            followupType,
+            recentMessages,
+          }),
+        },
+      ];
       const result = await gatewayFetch('/v1/chat/completions', {
         method: 'POST',
         headers: {
           'x-openclaw-agent-id': String(agentId),
           'x-openclaw-session-key': `followup:${channelId}:${customerId}`,
           'x-openclaw-message-channel': getChannelKey(normalizedType),
+          'x-openclaw-model': getOpenClawModelRef(aiProviderConfig.model),
         },
         body: {
-          model: 'openclaw',
+          model: `openclaw/${String(agentId)}`,
           stream: false,
-          messages: [
-            {
-              role: 'system',
-              content: 'Kamu sedang menyiapkan pesan follow-up outbound. Jangan panggil tools. Kembalikan hanya teks final atau NO_REPLY.',
-            },
-            {
-              role: 'user',
-              content: buildFollowupPrompt({
-                customerName,
-                customerPhone,
-                followupType,
-                recentMessages,
-              }),
-            },
-          ],
+          messages,
+          ...(aiProviderConfig.temperature !== undefined ? { temperature: aiProviderConfig.temperature } : {}),
+          ...(aiProviderConfig.topP !== undefined ? { top_p: aiProviderConfig.topP } : {}),
+          ...(aiProviderConfig.maxTokens !== undefined ? { max_tokens: aiProviderConfig.maxTokens } : {}),
+          ...(aiProviderConfig.reasoning !== undefined ? { reasoning_effort: aiProviderConfig.reasoning } : {}),
         },
       });
 
@@ -2352,7 +3027,8 @@ async function startAdapterApi() {
       };
     } catch (err) {
       console.error('[gateway-manager] followups/generate error:', err);
-      return reply.code(500).send({ error: err.message });
+      const providerError = normalizeAiProviderError(err);
+      return reply.code(providerError.statusCode).send({ error: providerError.message });
     }
   });
 
@@ -2417,6 +3093,7 @@ async function startAdapterApi() {
 async function main() {
   console.log('[gateway-manager] myagentclaw openclaw adapter starting...');
   try {
+    validateAiProviderConfig(console);
     setup();
     await startAdapterApi();
   } catch (err) {

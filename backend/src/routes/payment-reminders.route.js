@@ -36,6 +36,54 @@ const reminderStatusEnum = z.enum(PAYMENT_REMINDER_STATUSES);
 const reminderTypeEnum = z.enum(PAYMENT_REMINDER_TYPES);
 const optionalTextSchema = z.preprocess(normalizeOptionalText, z.string().max(2000).optional());
 
+function parseWibDateInput(value) {
+  if (value === undefined || value === null || value === '') {
+    return undefined;
+  }
+
+  if (value instanceof Date) {
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    const normalized = value.trim();
+
+    const localDateTimeMatch = normalized.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
+    if (localDateTimeMatch) {
+      const [, year, month, day, hour, minute] = localDateTimeMatch;
+      return new Date(Date.UTC(
+        Number(year),
+        Number(month) - 1,
+        Number(day),
+        Number(hour) - 7,
+        Number(minute),
+        0,
+        0,
+      ));
+    }
+
+    const localDateMatch = normalized.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (localDateMatch) {
+      const [, year, month, day] = localDateMatch;
+      return new Date(Date.UTC(
+        Number(year),
+        Number(month) - 1,
+        Number(day),
+        -7,
+        0,
+        0,
+        0,
+      ));
+    }
+
+    return new Date(normalized);
+  }
+
+  return new Date(value);
+}
+
+const wibDateSchema = z.preprocess(parseWibDateInput, z.date());
+
 const listQuerySchema = z.object({
   workspaceId: z.string().min(1),
   status: reminderStatusEnum.optional(),
@@ -57,8 +105,8 @@ const createReminderSchema = z.object({
   description: optionalTextSchema,
   amount: z.coerce.number().nonnegative().optional().nullable(),
   currency: z.string().trim().min(3).max(10).optional(),
-  dueDate: z.coerce.date(),
-  scheduledAt: z.coerce.date().optional(),
+  dueDate: wibDateSchema,
+  scheduledAt: wibDateSchema.optional(),
   templateType: reminderTypeEnum.optional().nullable(),
   messageContent: optionalTextSchema,
 });
@@ -73,8 +121,8 @@ const updateReminderSchema = z.object({
   description: optionalTextSchema,
   amount: z.coerce.number().nonnegative().optional().nullable(),
   currency: z.string().trim().min(3).max(10).optional(),
-  dueDate: z.coerce.date().optional(),
-  scheduledAt: z.coerce.date().optional(),
+  dueDate: wibDateSchema.optional(),
+  scheduledAt: wibDateSchema.optional(),
   templateType: reminderTypeEnum.optional().nullable(),
   messageContent: optionalTextSchema,
 });
@@ -84,8 +132,8 @@ const workspaceBodySchema = z.object({
 });
 
 const rescheduleReminderSchema = workspaceBodySchema.extend({
-  scheduledAt: z.coerce.date(),
-  dueDate: z.coerce.date().optional(),
+  scheduledAt: wibDateSchema,
+  dueDate: wibDateSchema.optional(),
 });
 
 const REMINDER_TYPES_REQUIRING_AMOUNT = new Set(['INVOICE', 'DP', 'INSTALLMENT']);

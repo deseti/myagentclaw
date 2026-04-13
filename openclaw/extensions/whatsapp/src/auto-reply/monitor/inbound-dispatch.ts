@@ -46,6 +46,8 @@ type SenderContext = {
   e164?: string;
 };
 
+const EMPTY_RESPONSE_FALLBACK = "Maaf, saya sedang mengalami gangguan sebentar. Coba kirim pesan lagi ya.";
+
 function resolveWhatsAppDisableBlockStreaming(cfg: ReturnType<LoadConfigFn>): boolean | undefined {
   if (typeof cfg.channels?.whatsapp?.blockStreaming !== "boolean") {
     return undefined;
@@ -320,7 +322,24 @@ export async function dispatchWhatsAppBufferedReply(params: {
       params.groupHistories.set(params.groupHistoryKey, []);
     }
     logVerbose("Skipping auto-reply: silent token or no text/media returned from resolver");
-    return false;
+    await params.deliverReply({
+      replyResult: { text: EMPTY_RESPONSE_FALLBACK },
+      msg: params.msg,
+      mediaLocalRoots,
+      maxMediaBytes: params.maxMediaBytes,
+      textLimit,
+      chunkMode,
+      replyLogger: params.replyLogger,
+      connectionId: params.connectionId,
+      skipLog: false,
+      tableMode,
+    });
+    params.rememberSentText(EMPTY_RESPONSE_FALLBACK, {
+      combinedBody: params.context.Body as string | undefined,
+      combinedBodySessionKey: params.route.sessionKey,
+      logVerboseMessage: true,
+    });
+    return true;
   }
 
   if (params.shouldClearGroupHistory) {

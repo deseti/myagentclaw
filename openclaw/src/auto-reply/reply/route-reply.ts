@@ -17,6 +17,10 @@ import { hasReplyPayloadContent } from "../../interactive/payload.js";
 import { INTERNAL_MESSAGE_CHANNEL, normalizeMessageChannel } from "../../utils/message-channel.js";
 import type { OriginatingChannelType } from "../templating.js";
 import type { ReplyPayload } from "../types.js";
+import {
+  CUSTOMER_CHANNEL_SAFE_FALLBACK_TEXT,
+  isCustomerFacingReplyChannel,
+} from "./customer-facing-reply.js";
 import { normalizeReplyPayload } from "./normalize-reply.js";
 import {
   formatBtwTextForExternalDelivery,
@@ -99,17 +103,25 @@ export async function routeReply(params: RouteReplyParams): Promise<RouteReplyRe
     : cfg.messages?.responsePrefix === "auto"
       ? undefined
       : cfg.messages?.responsePrefix;
-  const normalized = normalizeReplyPayload(payload, {
-    responsePrefix,
-    transformReplyPayload: plugin?.messaging?.transformReplyPayload
-      ? (nextPayload) =>
-          plugin.messaging?.transformReplyPayload?.({
-            payload: nextPayload,
-            cfg,
-            accountId,
-          }) ?? nextPayload
-      : undefined,
-  });
+  const sanitizeCustomerFacingText = isCustomerFacingReplyChannel(channelId ?? normalizedChannel);
+  const normalizePayload = (nextPayload: ReplyPayload) =>
+    normalizeReplyPayload(nextPayload, {
+      responsePrefix,
+      sanitizeCustomerFacingText,
+      transformReplyPayload: plugin?.messaging?.transformReplyPayload
+        ? (nextReplyPayload) =>
+            plugin.messaging?.transformReplyPayload?.({
+              payload: nextReplyPayload,
+              cfg,
+              accountId,
+            }) ?? nextReplyPayload
+        : undefined,
+    });
+  const normalized = normalizePayload(payload) ?? (
+    sanitizeCustomerFacingText
+      ? normalizePayload({ text: CUSTOMER_CHANNEL_SAFE_FALLBACK_TEXT })
+      : null
+  );
   if (!normalized) {
     return { ok: true };
   }

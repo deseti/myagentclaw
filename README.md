@@ -5,7 +5,7 @@ AI Operating Layer untuk bisnis berbasis chat di Indonesia.
 ## Stack
 - **Frontend**: Next.js 14 (App Router) + Tailwind CSS + Shadcn/UI
 - **Backend**: Node.js + Fastify + Prisma ORM
-- **AI Runtime**: OpenClaw (custom) + OpenAI / Anthropic
+- **AI Runtime**: OpenClaw (custom) + OpenAI-compatible Provider
 - **Database**: PostgreSQL 15 + Redis 7
 - **Channel**: Telegram Bot API
 - **Payment**: Xendit
@@ -24,6 +24,7 @@ myagentclaw/
 
 1. Copy `.env.example` ke `.env` dan isi semua nilai
 2. Jika mau aktifkan login Google, isi `GOOGLE_CLIENT_ID` dan `NEXT_PUBLIC_GOOGLE_CLIENT_ID` dengan OAuth Client ID tipe Web dari Google Cloud Console
+3. Untuk testing AI via Groq, gunakan `OPENAI_API_KEY`, `OPENAI_BASE_URL=https://api.groq.com/openai/v1`, `OPENAI_MODEL=qwen/qwen3-32b`, `OPENAI_TEMPERATURE=0.4`, `OPENAI_TOP_P=0.95`, `OPENAI_MAX_TOKENS=200`, `OPENAI_STREAM=true`, dan `OPENAI_REASONING=none`.
 3. Jalankan semua service:
 ```bash
 docker compose up -d

@@ -11,6 +11,10 @@ function isPositiveFiniteTokenLimit(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
 
+function isNonEmptyModelInput(value: unknown): value is unknown[] {
+  return Array.isArray(value) && value.length > 0;
+}
+
 function resolvePreferredTokenLimit(params: {
   explicitPresent: boolean;
   explicitValue: unknown;
@@ -23,6 +27,19 @@ function resolvePreferredTokenLimit(params: {
     return params.implicitValue;
   }
   return isPositiveFiniteTokenLimit(params.explicitValue) ? params.explicitValue : undefined;
+}
+
+function resolvePreferredModelInput(params: {
+  explicitValue: unknown;
+  implicitValue: unknown;
+}): unknown[] | undefined {
+  if (isNonEmptyModelInput(params.explicitValue)) {
+    return params.explicitValue;
+  }
+  if (isNonEmptyModelInput(params.implicitValue)) {
+    return params.implicitValue;
+  }
+  return undefined;
 }
 
 function getProviderModelId(model: unknown): string {
@@ -95,10 +112,14 @@ export function mergeProviderModels(
       explicitValue: explicitModel.maxTokens,
       implicitValue: implicitModel.maxTokens,
     });
+    const input = resolvePreferredModelInput({
+      explicitValue: explicitModel.input,
+      implicitValue: implicitModel.input,
+    });
 
     return {
       ...explicitModel,
-      input: implicitModel.input,
+      input,
       reasoning: "reasoning" in explicitModel ? explicitModel.reasoning : implicitModel.reasoning,
       ...(contextWindow === undefined ? {} : { contextWindow }),
       ...(contextTokens === undefined ? {} : { contextTokens }),

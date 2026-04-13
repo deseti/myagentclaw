@@ -11,6 +11,7 @@ import {
   type CreateTypingCallbacksParams,
   type TypingCallbacks,
 } from "../channels/typing.js";
+import { isCustomerFacingReplyChannel } from "../auto-reply/reply/customer-facing-reply.js";
 
 export type ReplyPrefixContext = ReplyPrefixContextBundle["prefixContext"];
 export type { ReplyPrefixContextBundle, ReplyPrefixOptions };
@@ -19,6 +20,7 @@ export { createReplyPrefixContext, createReplyPrefixOptions, createTypingCallbac
 
 export type ChannelReplyPipeline = ReplyPrefixOptions & {
   typingCallbacks?: TypingCallbacks;
+  sanitizeCustomerFacingText?: boolean;
   transformReplyPayload?: (payload: ReplyPayload) => ReplyPayload | null;
 };
 
@@ -42,6 +44,7 @@ export function createChannelReplyPipeline(params: {
           accountId: params.accountId,
         }) ?? payload
     : undefined;
+  const sanitizeCustomerFacingText = Boolean(channelId && isCustomerFacingReplyChannel(channelId));
   return {
     ...createReplyPrefixOptions({
       cfg: params.cfg,
@@ -49,6 +52,7 @@ export function createChannelReplyPipeline(params: {
       channel: params.channel,
       accountId: params.accountId,
     }),
+    ...(sanitizeCustomerFacingText ? { sanitizeCustomerFacingText: true } : {}),
     ...(transformReplyPayload ? { transformReplyPayload } : {}),
     ...(params.typingCallbacks
       ? { typingCallbacks: params.typingCallbacks }

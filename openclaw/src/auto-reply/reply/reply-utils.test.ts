@@ -235,6 +235,34 @@ describe("normalizeReplyPayload", () => {
     );
     expect(result!.interactive).toBeUndefined();
   });
+
+  it("strips leaked reasoning-style lines for customer-facing channels", () => {
+    const result = normalizeReplyPayload(
+      {
+        text: "Analysis:\nThe user is asking about ongkir.\nBisa kak, ongkir ke Jakarta mulai Rp10.000 ya.",
+      },
+      { sanitizeCustomerFacingText: true },
+    );
+
+    expect(result).not.toBeNull();
+    expect(result!.text).toBe("Bisa kak, ongkir ke Jakarta mulai Rp10.000 ya.");
+  });
+
+  it("drops fully leaked reasoning replies for customer-facing channels", () => {
+    const reasons: string[] = [];
+    const result = normalizeReplyPayload(
+      {
+        text: "The user is asking about pricing.\nI will respond in Bahasa Indonesia.",
+      },
+      {
+        sanitizeCustomerFacingText: true,
+        onSkip: (reason) => reasons.push(reason),
+      },
+    );
+
+    expect(result).toBeNull();
+    expect(reasons).toEqual(["empty"]);
+  });
 });
 
 describe("typing controller", () => {

@@ -53,10 +53,15 @@ export async function ocStopBot(channelId, runtime = {}) {
   return ocStopChannel(channelId, 'TELEGRAM', runtime);
 }
 
-export async function ocStopChannel(channelId, channelType, runtime = {}) {
+export async function ocStopChannel(channelId, channelType, runtime = {}, options = {}) {
   return adapterFetch('/bots/stop', {
     method: 'POST',
-    body: JSON.stringify({ channelId, type: channelType }),
+    body: JSON.stringify({
+      channelId,
+      type: channelType,
+      removeRegistration: options.removeRegistration === true,
+      reason: options.reason,
+    }),
   }, runtime);
 }
 

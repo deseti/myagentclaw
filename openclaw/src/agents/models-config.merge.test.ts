@@ -46,7 +46,7 @@ describe("models-config merge helpers", () => {
     } as ExistingProviderConfig;
   }
 
-  it("refreshes implicit model metadata while preserving explicit reasoning overrides", () => {
+  it("preserves explicit input while refreshing implicit model metadata", () => {
     const merged = mergeProviderModels(
       {
         api: "openai-responses",
@@ -67,7 +67,7 @@ describe("models-config merge helpers", () => {
           {
             id: "gpt-5.4",
             name: "GPT-5.4",
-            input: ["image"],
+            input: ["text", "image"],
             reasoning: false,
             cost: { input: 123, output: 456, cacheRead: 0, cacheWrite: 0 },
             contextWindow: 2_000_000,
@@ -80,7 +80,7 @@ describe("models-config merge helpers", () => {
     expect(merged.models).toEqual([
       expect.objectContaining({
         id: "gpt-5.4",
-        input: ["text"],
+        input: ["text", "image"],
         reasoning: false,
         cost: { input: 123, output: 456, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 2_000_000,

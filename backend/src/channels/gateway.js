@@ -23,6 +23,7 @@ import {
   normalizeCustomerPhone,
   stripCustomerPhonePrefix,
 } from '../lib/channel-utils.js';
+import { getAiProviderConfig } from '../lib/ai-provider-config.js';
 
 /** Lazy getter untuk Socket.IO instance (hindari circular import dengan index.js) */
 async function getIO() {
@@ -38,7 +39,7 @@ const QUOTA_EXHAUSTED_MSG =
   'Maaf, layanan kami sedang penuh untuk bulan ini. Silakan coba lagi bulan depan atau upgrade paket Anda.';
 const SUSPENDED_MSG =
   'Maaf, layanan sementara tidak tersedia. Hubungi admin untuk informasi lebih lanjut.';
-const DEFAULT_LLM_MODEL = process.env.DEFAULT_LLM_MODEL || 'openai-codex/gpt-5.4';
+const DEFAULT_AI_PROVIDER_MODEL = getAiProviderConfig().model;
 
 /**
  * handleIncoming — Jalur kompatibilitas lama untuk pesan masuk.
@@ -298,7 +299,7 @@ export async function handleIncoming(normalizedMsg, fastifyInstance) {
       agentId: agentIdForGateway,
       sessionKey,
       userMessage: message,
-      model: agent.llmModel ?? DEFAULT_LLM_MODEL,
+      model: DEFAULT_AI_PROVIDER_MODEL,
       history: historyMessages,
     });
 

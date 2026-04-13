@@ -19,10 +19,14 @@ import {
   getInternalSkillDefinition,
   workspaceMeetsMinimumTier,
 } from '../lib/internal-skills.js';
+import {
+  AI_PROVIDER_DB_VALUE,
+  getAiProviderConfig,
+} from '../lib/ai-provider-config.js';
 import { matchesSkillKey } from '../lib/skill-activation.js';
 
-const DEFAULT_LLM_PROVIDER = process.env.DEFAULT_LLM_PROVIDER || 'openai-codex';
-const DEFAULT_LLM_MODEL = process.env.DEFAULT_LLM_MODEL || 'openai-codex/gpt-5.4';
+const DEFAULT_AI_PROVIDER = AI_PROVIDER_DB_VALUE;
+const DEFAULT_AI_PROVIDER_MODEL = getAiProviderConfig().model;
 
 // Limit jumlah agent per tier
 const AGENT_LIMIT = {
@@ -305,8 +309,8 @@ export default async function agentRoute(fastify) {
         persona,
         goal: goal || null,
         tone: tone || null,
-        llmProvider: DEFAULT_LLM_PROVIDER,
-        llmModel: DEFAULT_LLM_MODEL,
+        llmProvider: DEFAULT_AI_PROVIDER,
+        llmModel: DEFAULT_AI_PROVIDER_MODEL,
         openclawSkill: normalizedSkills[0] || null,
         accessMode: normalizedAccessMode,
         approvalCode: generateApprovalCode(),
