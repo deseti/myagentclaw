@@ -3,15 +3,16 @@ import prisma from '../../lib/prisma.js';
 import { normalizeCustomerPhone } from '../../lib/channel-utils.js';
 import {
   APPROVAL_SUCCESS_REPLY,
-  DEFAULT_PENDING_REPLY,
-  INVALID_APPROVAL_CODE_REPLY,
   looksLikeApprovalCode,
   mapCustomerLifecycleStatus,
   normalizeApprovalCodeInput,
+  sendPendingReply,
+  validateApprovalCode,
 } from '../../lib/agent-access.js';
 import {
-  approveAgentCustomerAccess,
+  approveCustomer,
   resolveInboundConversationStatus,
+  shouldBlockPendingCustomer,
   upsertAgentCustomerAccess,
 } from '../../lib/agent-customer-access.js';
 import { syncApprovedCustomerToChannel } from '../../lib/channel-access-sync.js';
@@ -56,7 +57,31 @@ function serializeCustomerAccessState({ customer, agent, agentAccess }) {
   return {
     lifecycleStatus,
     accessStatus: agentAccess?.status || (agent?.accessMode === 'APPROVAL_REQUIRED' ? 'PENDING' : 'ACTIVE'),
+    approvedAt: agentAccess?.approvedAt || null,
+    approvalCodeMatchedAt: agentAccess?.approvalCodeMatchedAt || null,
+    lastPendingAt: agentAccess?.lastPendingAt || null,
   };
+}
+
+async function upsertCustomerForAccess({ workspaceId, phoneNumber, customerName, now }) {
+  return prisma.customer.upsert({
+    where: {
+      workspaceId_phoneNumber: {
+        workspaceId,
+        phoneNumber,
+      },
+    },
+    update: {
+      lastSeen: now,
+      ...(customerName ? { name: customerName } : {}),
+    },
+    create: {
+      workspaceId,
+      phoneNumber,
+      name: customerName || null,
+      lastSeen: now,
+    },
+  });
 }
 
 /**
@@ -104,7 +129,13 @@ export default async function internalMessageRoute(fastify) {
         archivedAt: true,
         agentAccesses: {
           where: { agentId: channelRecord.agentId },
-          select: { id: true, status: true },
+          select: {
+            id: true,
+            status: true,
+            approvedAt: true,
+            approvalCodeMatchedAt: true,
+            lastPendingAt: true,
+          },
           take: 1,
         },
       },
@@ -165,7 +196,7 @@ export default async function internalMessageRoute(fastify) {
 
     const now = new Date();
     const normalizedPhone = normalizeCustomerPhone(channelRecord.type, parsed.data.customer_phone);
-    const customer = await prisma.customer.findUnique({
+    const existingCustomer = await prisma.customer.findUnique({
       where: {
         workspaceId_phoneNumber: {
           workspaceId: channelRecord.workspaceId,
@@ -180,15 +211,17 @@ export default async function internalMessageRoute(fastify) {
       },
     });
 
-    const agentAccess = customer?.agentAccesses?.[0] || null;
+    const existingAgentAccess = existingCustomer?.agentAccesses?.[0] || null;
     const normalizedContent = normalizeApprovalCodeInput(parsed.data.content);
     const normalizedApprovalCode = normalizeApprovalCodeInput(channelRecord.agent.approvalCode);
 
-    if (customer?.isBlocked) {
+    if (existingCustomer?.isBlocked) {
       return reply.send({
         ok: true,
         decision: 'BLOCK',
-        customer: customer ? serializeCustomerAccessState({ customer, agent: channelRecord.agent, agentAccess }) : null,
+        customer: existingCustomer
+          ? serializeCustomerAccessState({ customer: existingCustomer, agent: channelRecord.agent, agentAccess: existingAgentAccess })
+          : null,
       });
     }
 
@@ -196,47 +229,42 @@ export default async function internalMessageRoute(fastify) {
       return reply.send({
         ok: true,
         decision: 'BLOCK',
-        customer: customer ? serializeCustomerAccessState({ customer, agent: channelRecord.agent, agentAccess }) : null,
+        customer: existingCustomer
+          ? serializeCustomerAccessState({ customer: existingCustomer, agent: channelRecord.agent, agentAccess: existingAgentAccess })
+          : null,
       });
     }
 
-    if (channelRecord.agent.accessMode !== 'APPROVAL_REQUIRED' || agentAccess?.status === 'ACTIVE') {
+    if (!shouldBlockPendingCustomer(channelRecord.agent, existingAgentAccess)) {
       return reply.send({
         ok: true,
         decision: 'ALLOW',
-        customer: customer ? serializeCustomerAccessState({ customer, agent: channelRecord.agent, agentAccess }) : null,
+        customer: existingCustomer
+          ? serializeCustomerAccessState({ customer: existingCustomer, agent: channelRecord.agent, agentAccess: existingAgentAccess })
+          : null,
       });
     }
 
-    if (normalizedApprovalCode && normalizedContent && normalizedContent === normalizedApprovalCode) {
-      let approvedCustomer = customer;
+    const approvalCodeMatches = validateApprovalCode(channelRecord.agent, parsed.data.content);
+
+    if (approvalCodeMatches) {
+      let approvedCustomer = existingCustomer;
 
       if (!approvedCustomer) {
-        approvedCustomer = await prisma.customer.upsert({
-          where: {
-            workspaceId_phoneNumber: {
-              workspaceId: channelRecord.workspaceId,
-              phoneNumber: normalizedPhone,
-            },
-          },
-          update: {
-            lastSeen: now,
-            ...(parsed.data.customer_name ? { name: parsed.data.customer_name } : {}),
-          },
-          create: {
-            workspaceId: channelRecord.workspaceId,
-            phoneNumber: normalizedPhone,
-            name: parsed.data.customer_name || null,
-            lastSeen: now,
-          },
+        approvedCustomer = await upsertCustomerForAccess({
+          workspaceId: channelRecord.workspaceId,
+          phoneNumber: normalizedPhone,
+          customerName: parsed.data.customer_name,
+          now,
         });
       }
 
-      const approvedAccess = await approveAgentCustomerAccess(prisma, {
+      const approvedAccess = await approveCustomer(prisma, {
         workspaceId: channelRecord.workspaceId,
         agentId: channelRecord.agentId,
         customerId: approvedCustomer.id,
         approvedAt: now,
+        approvalCodeMatchedAt: now,
       });
 
       await syncApprovedCustomerToChannel({
@@ -268,20 +296,32 @@ export default async function internalMessageRoute(fastify) {
       });
     }
 
-    if (normalizedContent && looksLikeApprovalCode(parsed.data.content, normalizedApprovalCode.length || 8)) {
-      return reply.send({
-        ok: true,
-        decision: 'INVALID_CODE',
-        replyText: INVALID_APPROVAL_CODE_REPLY,
-        customer: customer ? serializeCustomerAccessState({ customer, agent: channelRecord.agent, agentAccess }) : null,
-      });
-    }
+    const customer = existingCustomer || await upsertCustomerForAccess({
+      workspaceId: channelRecord.workspaceId,
+      phoneNumber: normalizedPhone,
+      customerName: parsed.data.customer_name,
+      now,
+    });
+    const agentAccess = await upsertAgentCustomerAccess(prisma, {
+      workspaceId: channelRecord.workspaceId,
+      agent: channelRecord.agent,
+      customerId: customer.id,
+      role: 'CUSTOMER',
+      now,
+    });
+    const invalidCode = Boolean(normalizedContent)
+      && looksLikeApprovalCode(parsed.data.content, normalizedApprovalCode.length || 8);
+    const replyText = sendPendingReply({
+      agent: channelRecord.agent,
+      hasExistingPending: Boolean(existingCustomer?.id || existingAgentAccess?.id),
+      invalidCode,
+    });
 
     return reply.send({
       ok: true,
-      decision: 'PENDING',
-      replyText: DEFAULT_PENDING_REPLY,
-      customer: customer ? serializeCustomerAccessState({ customer, agent: channelRecord.agent, agentAccess }) : null,
+      decision: invalidCode ? 'INVALID_CODE' : 'PENDING',
+      replyText,
+      customer: serializeCustomerAccessState({ customer, agent: channelRecord.agent, agentAccess }),
     });
   });
 

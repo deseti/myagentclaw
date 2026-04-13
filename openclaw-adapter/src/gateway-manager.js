@@ -73,6 +73,75 @@ function resolveAllowFromStorePath(channelType, accountId) {
   return join(CREDENTIALS_DIR, `${safeStoreKey(getChannelKey(channelType))}-${safeStoreKey(accountId)}-allowFrom.json`);
 }
 
+const WHATSAPP_GATEWAY_ROUTE_CANDIDATES = Object.freeze({
+  status: [
+    '/api/myagentclaw/whatsapp/link/status',
+    '/api/whatsapp/link/status',
+    '/channels/whatsapp/link/status',
+    '/api/link/status',
+  ],
+  start: [
+    '/api/myagentclaw/whatsapp/link/start',
+    '/api/whatsapp/link/start',
+    '/channels/whatsapp/link/start',
+    '/api/link/start',
+  ],
+  wait: [
+    '/api/myagentclaw/whatsapp/link/wait',
+    '/api/whatsapp/link/wait',
+    '/channels/whatsapp/link/wait',
+    '/api/link/wait',
+  ],
+});
+
+const WHATSAPP_ADAPTER_ROUTE_ALIASES = Object.freeze({
+  status: [
+    '/api/myagentclaw/whatsapp/link/status',
+    '/api/whatsapp/link/status',
+    '/channels/whatsapp/link/status',
+    '/api/link/status',
+  ],
+  start: [
+    '/api/myagentclaw/whatsapp/link/start',
+    '/api/whatsapp/link/start',
+    '/channels/whatsapp/link/start',
+    '/api/link/start',
+  ],
+  wait: [
+    '/api/myagentclaw/whatsapp/link/wait',
+    '/api/whatsapp/link/wait',
+    '/channels/whatsapp/link/wait',
+    '/api/link/wait',
+  ],
+});
+
+function splitSafePathSegments(value) {
+  return String(value || '')
+    .split('/')
+    .map((segment) => segment.trim())
+    .filter(Boolean)
+    .map((segment) => safeStoreKey(segment));
+}
+
+function buildWhatsAppSessionIdentity(agentConfig = {}, channelId = '') {
+  const agentSegment = safeStoreKey(agentConfig.agentId || agentConfig.id || channelId || 'unassigned');
+
+  return {
+    authDir: join('auth', `agent-${agentSegment}`, 'whatsapp'),
+    runtimeSessionId: `runtime-agent-${agentSegment}-whatsapp`,
+    adapterSessionId: `adapter-agent-${agentSegment}-whatsapp`,
+  };
+}
+
+function resolveWhatsAppAuthDir(agentConfig = {}, channelId = '') {
+  const customSegments = splitSafePathSegments(agentConfig.whatsappAuthNamespace);
+  if (customSegments.length > 0) {
+    return join('auth', ...customSegments);
+  }
+
+  return buildWhatsAppSessionIdentity(agentConfig, channelId).authDir;
+}
+
 function normalizeApprovedCustomerEntry(channelType, value) {
   const raw = String(value || '').trim();
   if (!raw) return '';
@@ -161,7 +230,7 @@ function buildChannelAccountConfig(channelType, channelId, credentials = {}, age
     return {
       name,
       enabled: true,
-      authDir: `accounts/whatsapp/${channelId}`,
+      authDir: resolveWhatsAppAuthDir(agentConfig, channelId),
     };
   }
 
@@ -565,13 +634,13 @@ function ensureAllowedHostname(config, hostname) {
 
 function readConfig() {
   if (!existsSync(CONFIG_PATH)) return buildBaseConfig();
-  try { return JSON.parse(readFileSync(CONFIG_PATH, 'utf8')); }
+  try { return sanitizeRuntimeConfig(JSON.parse(readFileSync(CONFIG_PATH, 'utf8'))); }
   catch { return buildBaseConfig(); }
 }
 
 function saveConfig(config) {
   mkdirSync(OPENCLAW_HOME, { recursive: true });
-  writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
+  writeFileSync(CONFIG_PATH, JSON.stringify(sanitizeRuntimeConfig(config), null, 2));
 }
 
 function touchConfig() {
@@ -699,6 +768,61 @@ function parseGatewayFetchError(error) {
       rawRuntimePayload: rawBody || message,
     },
   };
+}
+
+async function gatewayFetchWithFallback(paths, options = {}, meta = {}) {
+  const candidates = [...new Set(
+    (Array.isArray(paths) ? paths : [paths])
+      .filter((path) => typeof path === 'string' && path.trim())
+      .map((path) => path.trim()),
+  )];
+
+  let lastFailure = null;
+
+  for (let index = 0; index < candidates.length; index += 1) {
+    const candidatePath = candidates[index];
+
+    try {
+      return await gatewayFetch(candidatePath, options);
+    } catch (error) {
+      const failure = parseGatewayFetchError(error);
+      const canRetry = failure.statusCode === 404 && index < candidates.length - 1;
+      lastFailure = failure;
+
+      console.warn('[gateway-manager] gateway route attempt failed', sanitizeQrPayload({
+        action: meta.action || 'gatewayFetchWithFallback',
+        candidatePath,
+        statusCode: failure.statusCode,
+        channelId: meta.channelId || null,
+        forceFreshLogin: meta.forceFreshLogin === true,
+        willRetry: canRetry,
+        payload: failure.payload,
+      }));
+
+      if (canRetry) {
+        continue;
+      }
+
+      const enrichedError = new Error(
+        failure.payload?.adapterError || failure.payload?.message || `Gateway request failed for ${candidatePath}`,
+      );
+      enrichedError.statusCode = failure.statusCode;
+      enrichedError.payload = failure.payload;
+      throw enrichedError;
+    }
+  }
+
+  const fallbackFailure = lastFailure || {
+    statusCode: 502,
+    payload: {
+      error: 'Bad Gateway',
+      message: 'Semua route WhatsApp gateway gagal dijangkau.',
+    },
+  };
+  const error = new Error(fallbackFailure.payload?.message || 'Gateway request gagal');
+  error.statusCode = fallbackFailure.statusCode;
+  error.payload = fallbackFailure.payload;
+  throw error;
 }
 
 function parseSkillManifest(markdown = '') {
@@ -1357,6 +1481,24 @@ function syncDefaultChannelAccount(config, channelType) {
   }
 }
 
+function sanitizeRuntimeConfig(config = {}) {
+  const whatsappAccounts = config?.channels?.whatsapp?.accounts;
+  if (!whatsappAccounts || typeof whatsappAccounts !== 'object') {
+    return config;
+  }
+
+  for (const accountConfig of Object.values(whatsappAccounts)) {
+    if (!accountConfig || typeof accountConfig !== 'object') {
+      continue;
+    }
+
+    delete accountConfig.runtimeSessionId;
+    delete accountConfig.adapterSessionId;
+  }
+
+  return config;
+}
+
 function buildBaseConfig() {
   const internalKey = process.env.INTERNAL_SECRET_KEY || '';
   const backendUrl  = process.env.BACKEND_INTERNAL_URL || 'http://backend:3001';
@@ -1464,11 +1606,13 @@ function setup() {
 
   if (existsSync(HOOKS_SOURCE)) {
     cpSync(HOOKS_SOURCE, HOOKS_DEST, { recursive: true });
+    applyWorkspacePermissions(HOOKS_DEST, 'rw');
     console.log('[gateway-manager] Hooks copied to', HOOKS_DEST);
   }
 
   if (existsSync(PLUGINS_SOURCE)) {
     cpSync(PLUGINS_SOURCE, PLUGINS_DEST, { recursive: true });
+    applyWorkspacePermissions(PLUGINS_DEST, 'rw');
     console.log('[gateway-manager] Plugins copied to', PLUGINS_DEST);
   }
 
@@ -1866,6 +2010,168 @@ Saat percakapan baru dimulai (sesi baru), perkenalkan diri sebagai ${name} dari 
 async function startAdapterApi() {
   const api = Fastify({ logger: false });
 
+  const registerAliasRoutes = (paths, handler) => {
+    for (const path of [...new Set(paths)]) {
+      api.post(path, handler);
+    }
+  };
+
+  const replyWithGatewayFailure = (reply, action, channelId, error, extra = {}) => {
+    const failure = error?.payload
+      ? { statusCode: error.statusCode || 502, payload: error.payload }
+      : parseGatewayFetchError(error);
+
+    console.error(`[gateway-manager] ${action}:error`, sanitizeQrPayload({
+      channelId: String(channelId || ''),
+      ...extra,
+      statusCode: failure.statusCode,
+      payload: failure.payload,
+    }));
+
+    return reply.code(failure.statusCode).send(failure.payload);
+  };
+
+  const handleWhatsAppLinkStatusRequest = async (req, reply) => {
+    const { channelId } = req.body || {};
+    if (!channelId) {
+      return reply.code(400).send({ error: 'channelId diperlukan' });
+    }
+
+    try {
+      const result = await gatewayFetchWithFallback(WHATSAPP_GATEWAY_ROUTE_CANDIDATES.status, {
+        method: 'POST',
+        body: {
+          accountId: String(channelId),
+          channelId: String(channelId),
+        },
+        timeoutMs: 10000,
+      }, {
+        action: 'whatsapp-link-status',
+        channelId: String(channelId),
+      });
+      console.log('[gateway-manager] whatsapp-link-status', sanitizeQrPayload({
+        channelId: String(channelId),
+        summary: summarizeQrPayload(result || {}),
+        rawRuntimePayload: result?.rawRuntimePayload || result || null,
+      }));
+      return result;
+    } catch (error) {
+      return replyWithGatewayFailure(reply, 'whatsapp-link-status', channelId, error);
+    }
+  };
+
+  const handleWhatsAppLinkStartRequest = async (req, reply) => {
+    const {
+      channelId,
+      agentId,
+      force,
+      forceFreshLogin,
+      timeoutMs,
+      authNamespace,
+      runtimeSessionId,
+      adapterSessionId,
+      previousAuthNamespace,
+      previousRuntimeSessionId,
+      previousAdapterSessionId,
+      previousAuthDir,
+    } = req.body || {};
+
+    if (!channelId) {
+      return reply.code(400).send({ error: 'channelId diperlukan' });
+    }
+
+    const requestedTimeoutMs = Number.isFinite(Number(timeoutMs)) ? Number(timeoutMs) : 30000;
+    const isFreshLogin = forceFreshLogin === true;
+
+    if (isFreshLogin) {
+      console.log('[gateway-manager] Fresh login requested', sanitizeQrPayload({
+        channelId: String(channelId),
+        agentId: agentId ? String(agentId) : null,
+        previousRuntimeSessionId: previousRuntimeSessionId || null,
+        previousAdapterSessionId: previousAdapterSessionId || null,
+        previousAuthNamespace: previousAuthNamespace || null,
+        authNamespace: authNamespace || null,
+        runtimeSessionId: runtimeSessionId || null,
+        adapterSessionId: adapterSessionId || null,
+      }));
+    }
+
+    try {
+      const result = await gatewayFetchWithFallback(WHATSAPP_GATEWAY_ROUTE_CANDIDATES.start, {
+        method: 'POST',
+        body: {
+          accountId: String(channelId),
+          channelId: String(channelId),
+          agentId: agentId ? String(agentId) : undefined,
+          force: force === true || isFreshLogin,
+          forceFreshLogin: isFreshLogin,
+          timeoutMs: requestedTimeoutMs,
+          authNamespace: typeof authNamespace === 'string' ? authNamespace : undefined,
+          runtimeSessionId: typeof runtimeSessionId === 'string' ? runtimeSessionId : undefined,
+          adapterSessionId: typeof adapterSessionId === 'string' ? adapterSessionId : undefined,
+          previousAuthNamespace: typeof previousAuthNamespace === 'string' ? previousAuthNamespace : undefined,
+          previousRuntimeSessionId: typeof previousRuntimeSessionId === 'string' ? previousRuntimeSessionId : undefined,
+          previousAdapterSessionId: typeof previousAdapterSessionId === 'string' ? previousAdapterSessionId : undefined,
+          previousAuthDir: typeof previousAuthDir === 'string' ? previousAuthDir : undefined,
+        },
+        timeoutMs: Math.max(40000, requestedTimeoutMs + 10000),
+      }, {
+        action: 'whatsapp-link-start',
+        channelId: String(channelId),
+        forceFreshLogin: isFreshLogin,
+      });
+
+      console.log('[gateway-manager] whatsapp-link-start', sanitizeQrPayload({
+        channelId: String(channelId),
+        force: force === true,
+        forceFreshLogin: isFreshLogin,
+        authNamespace: authNamespace || null,
+        summary: summarizeQrPayload(result || {}),
+        rawRuntimePayload: result?.rawRuntimePayload || result || null,
+      }));
+      return result;
+    } catch (error) {
+      return replyWithGatewayFailure(reply, 'whatsapp-link-start', channelId, error, {
+        force: force === true,
+        forceFreshLogin: isFreshLogin,
+      });
+    }
+  };
+
+  const handleWhatsAppLinkWaitRequest = async (req, reply) => {
+    const { channelId, timeoutMs } = req.body || {};
+    if (!channelId) {
+      return reply.code(400).send({ error: 'channelId diperlukan' });
+    }
+
+    try {
+      const requestedTimeoutMs = Number.isFinite(Number(timeoutMs)) ? Number(timeoutMs) : 120000;
+      const result = await gatewayFetchWithFallback(WHATSAPP_GATEWAY_ROUTE_CANDIDATES.wait, {
+        method: 'POST',
+        body: {
+          accountId: String(channelId),
+          channelId: String(channelId),
+          timeoutMs: requestedTimeoutMs,
+        },
+        timeoutMs: requestedTimeoutMs + 10000,
+      }, {
+        action: 'whatsapp-link-wait',
+        channelId: String(channelId),
+      });
+      console.log('[gateway-manager] whatsapp-link-wait', sanitizeQrPayload({
+        channelId: String(channelId),
+        timeoutMs: requestedTimeoutMs,
+        summary: summarizeQrPayload(result || {}),
+        rawRuntimePayload: result?.rawRuntimePayload || result || null,
+      }));
+      return result;
+    } catch (error) {
+      return replyWithGatewayFailure(reply, 'whatsapp-link-wait', channelId, error, {
+        timeoutMs: Number.isFinite(Number(timeoutMs)) ? Number(timeoutMs) : 120000,
+      });
+    }
+  };
+
   api.get('/health', async () => ({
     status: 'ok',
     service: 'openclaw-adapter',
@@ -1927,105 +2233,9 @@ async function startAdapterApi() {
     }
   });
 
-  api.post('/channels/whatsapp/link/status', async (req, reply) => {
-    const { channelId } = req.body || {};
-    if (!channelId) {
-      return reply.code(400).send({ error: 'channelId diperlukan' });
-    }
-
-    try {
-      const result = await gatewayFetch('/api/myagentclaw/whatsapp/link/status', {
-        method: 'POST',
-        body: { accountId: String(channelId) },
-        timeoutMs: 10000,
-      });
-      console.log('[gateway-manager] whatsapp-link-status', sanitizeQrPayload({
-        channelId: String(channelId),
-        summary: summarizeQrPayload(result || {}),
-        rawRuntimePayload: result?.rawRuntimePayload || result || null,
-      }));
-      return result;
-    } catch (error) {
-      const failure = parseGatewayFetchError(error);
-      console.error('[gateway-manager] whatsapp-link-status:error', sanitizeQrPayload({
-        channelId: String(channelId),
-        statusCode: failure.statusCode,
-        payload: failure.payload,
-      }));
-      return reply.code(failure.statusCode).send(failure.payload);
-    }
-  });
-
-  api.post('/channels/whatsapp/link/start', async (req, reply) => {
-    const { channelId, force, timeoutMs } = req.body || {};
-    if (!channelId) {
-      return reply.code(400).send({ error: 'channelId diperlukan' });
-    }
-
-    try {
-      const requestedTimeoutMs = Number.isFinite(Number(timeoutMs)) ? Number(timeoutMs) : 30000;
-      const result = await gatewayFetch('/api/myagentclaw/whatsapp/link/start', {
-        method: 'POST',
-        body: {
-          accountId: String(channelId),
-          force: force === true,
-          timeoutMs: requestedTimeoutMs,
-        },
-        timeoutMs: Math.max(40000, requestedTimeoutMs + 10000),
-      });
-      console.log('[gateway-manager] whatsapp-link-start', sanitizeQrPayload({
-        channelId: String(channelId),
-        force: force === true,
-        summary: summarizeQrPayload(result || {}),
-        rawRuntimePayload: result?.rawRuntimePayload || result || null,
-      }));
-      return result;
-    } catch (error) {
-      const failure = parseGatewayFetchError(error);
-      console.error('[gateway-manager] whatsapp-link-start:error', sanitizeQrPayload({
-        channelId: String(channelId),
-        force: force === true,
-        statusCode: failure.statusCode,
-        payload: failure.payload,
-      }));
-      return reply.code(failure.statusCode).send(failure.payload);
-    }
-  });
-
-  api.post('/channels/whatsapp/link/wait', async (req, reply) => {
-    const { channelId, timeoutMs } = req.body || {};
-    if (!channelId) {
-      return reply.code(400).send({ error: 'channelId diperlukan' });
-    }
-
-    try {
-      const requestedTimeoutMs = Number.isFinite(Number(timeoutMs)) ? Number(timeoutMs) : 120000;
-      const result = await gatewayFetch('/api/myagentclaw/whatsapp/link/wait', {
-        method: 'POST',
-        body: {
-          accountId: String(channelId),
-          timeoutMs: requestedTimeoutMs,
-        },
-        timeoutMs: requestedTimeoutMs + 10000,
-      });
-      console.log('[gateway-manager] whatsapp-link-wait', sanitizeQrPayload({
-        channelId: String(channelId),
-        timeoutMs: requestedTimeoutMs,
-        summary: summarizeQrPayload(result || {}),
-        rawRuntimePayload: result?.rawRuntimePayload || result || null,
-      }));
-      return result;
-    } catch (error) {
-      const failure = parseGatewayFetchError(error);
-      console.error('[gateway-manager] whatsapp-link-wait:error', sanitizeQrPayload({
-        channelId: String(channelId),
-        timeoutMs: Number.isFinite(Number(timeoutMs)) ? Number(timeoutMs) : 120000,
-        statusCode: failure.statusCode,
-        payload: failure.payload,
-      }));
-      return reply.code(failure.statusCode).send(failure.payload);
-    }
-  });
+  registerAliasRoutes(WHATSAPP_ADAPTER_ROUTE_ALIASES.status, handleWhatsAppLinkStatusRequest);
+  registerAliasRoutes(WHATSAPP_ADAPTER_ROUTE_ALIASES.start, handleWhatsAppLinkStartRequest);
+  registerAliasRoutes(WHATSAPP_ADAPTER_ROUTE_ALIASES.wait, handleWhatsAppLinkWaitRequest);
 
   api.post('/channels/access/grant', async (req, reply) => {
     const { channelId, channelType, customerPhone } = req.body || {};

@@ -9,11 +9,20 @@ export function resolveAgentCustomerAccessStatus(agent, agentAccess) {
   if (normalizeAgentAccessMode(agent?.accessMode) === AGENT_ACCESS_MODES.OPEN_ACCESS) {
     return AGENT_CUSTOMER_ACCESS_STATUSES.ACTIVE;
   }
+
+  if (!agentAccess?.status) {
+    return AGENT_CUSTOMER_ACCESS_STATUSES.PENDING;
+  }
+
   return normalizeAgentCustomerAccessStatus(agentAccess?.status);
 }
 
+export function shouldBlockPendingCustomer(agent, agentAccess) {
+  return resolveAgentCustomerAccessStatus(agent, agentAccess) === AGENT_CUSTOMER_ACCESS_STATUSES.PENDING;
+}
+
 export function resolveInboundConversationStatus(agent, agentAccess) {
-  return resolveAgentCustomerAccessStatus(agent, agentAccess) === AGENT_CUSTOMER_ACCESS_STATUSES.PENDING
+  return shouldBlockPendingCustomer(agent, agentAccess)
     ? 'NEEDS_ADMIN'
     : 'ACTIVE';
 }
@@ -52,6 +61,7 @@ export async function upsertAgentCustomerAccess(tx, {
         approvedAt: nextStatus === AGENT_CUSTOMER_ACCESS_STATUSES.ACTIVE
           ? existing.approvedAt || now
           : existing.approvedAt,
+        approvalCodeMatchedAt: existing.approvalCodeMatchedAt,
         lastPendingAt: nextStatus === AGENT_CUSTOMER_ACCESS_STATUSES.PENDING ? now : existing.lastPendingAt,
         lastMessageAt: now,
       },
@@ -65,18 +75,21 @@ export async function upsertAgentCustomerAccess(tx, {
       customerId,
       status: nextStatus,
       approvedAt: nextStatus === AGENT_CUSTOMER_ACCESS_STATUSES.ACTIVE ? now : null,
+      approvalCodeMatchedAt: null,
       lastPendingAt: nextStatus === AGENT_CUSTOMER_ACCESS_STATUSES.PENDING ? now : null,
       lastMessageAt: now,
     },
   });
 }
 
-export async function approveAgentCustomerAccess(prismaClient, {
+export async function approveCustomer(prismaClient, {
   workspaceId,
   agentId,
   customerId,
   approvedAt = new Date(),
+  approvalCodeMatchedAt,
 }) {
+  const matchedAtProvided = approvalCodeMatchedAt !== undefined;
   const agentAccess = await prismaClient.agentCustomerAccess.upsert({
     where: {
       agentId_customerId: {
@@ -87,6 +100,8 @@ export async function approveAgentCustomerAccess(prismaClient, {
     update: {
       status: AGENT_CUSTOMER_ACCESS_STATUSES.ACTIVE,
       approvedAt,
+      ...(matchedAtProvided ? { approvalCodeMatchedAt } : {}),
+      lastPendingAt: null,
       lastMessageAt: approvedAt,
     },
     create: {
@@ -95,6 +110,8 @@ export async function approveAgentCustomerAccess(prismaClient, {
       customerId,
       status: AGENT_CUSTOMER_ACCESS_STATUSES.ACTIVE,
       approvedAt,
+      approvalCodeMatchedAt: matchedAtProvided ? approvalCodeMatchedAt : null,
+      lastPendingAt: null,
       lastMessageAt: approvedAt,
     },
   });
@@ -112,4 +129,8 @@ export async function approveAgentCustomerAccess(prismaClient, {
   });
 
   return agentAccess;
+}
+
+export async function approveAgentCustomerAccess(prismaClient, params) {
+  return approveCustomer(prismaClient, params);
 }

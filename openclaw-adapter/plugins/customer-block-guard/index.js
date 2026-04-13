@@ -93,8 +93,16 @@ export default definePluginEntry({
       if (!['telegram', 'whatsapp'].includes(ctx.channelId)) return;
 
       const accountId = typeof ctx.accountId === 'string' ? ctx.accountId.trim() : '';
-      const senderId = normalizeTarget(ctx.channelId, ctx.senderId);
-      if (!accountId || !senderId) return;
+      const senderId = normalizeTarget(
+        ctx.channelId,
+        ctx.senderId || event?.senderId || ctx.conversationId || event?.conversationId,
+      );
+      if (!accountId || !senderId) {
+        api.logger.warn?.(
+          `customer-block-guard: skipped inbound guard due to missing identifiers channel=${ctx.channelId} account=${accountId || '-'} sender=${senderId || '-'} conversation=${ctx.conversationId || '-'}`,
+        );
+        return;
+      }
 
       try {
         const access = await resolveInboundAccess(accountId, senderId, event?.content || '');

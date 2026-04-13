@@ -1,5 +1,18 @@
 import prisma from '../lib/prisma.js';
 import {
+  APPROVAL_SUCCESS_REPLY,
+  looksLikeApprovalCode,
+  sendPendingReply,
+  validateApprovalCode,
+} from '../lib/agent-access.js';
+import {
+  approveCustomer,
+  resolveInboundConversationStatus,
+  shouldBlockPendingCustomer,
+  upsertAgentCustomerAccess,
+} from '../lib/agent-customer-access.js';
+import { syncApprovedCustomerToChannel } from '../lib/channel-access-sync.js';
+import {
   ocSendChannelMessage,
   sendMessageToAgent,
 } from '../lib/openclaw-client.js';
@@ -124,9 +137,63 @@ export async function handleIncoming(normalizedMsg, fastifyInstance) {
     create: { workspaceId, phoneNumber: normalizedCustomerPhone, name: customerName, lastSeen: now },
   });
 
+  const existingAgentAccess = await prisma.agentCustomerAccess.findUnique({
+    where: {
+      agentId_customerId: {
+        agentId: agent.id,
+        customerId: customer.id,
+      },
+    },
+  });
+
+  let agentAccess = existingAgentAccess;
+  let approvalFlowHandled = false;
+  let approvalReply = '';
+  const invalidApprovalCode = looksLikeApprovalCode(message);
+
+  if (agent.accessMode === 'APPROVAL_REQUIRED') {
+    agentAccess = await upsertAgentCustomerAccess(prisma, {
+      workspaceId,
+      agent,
+      customerId: customer.id,
+      role: 'CUSTOMER',
+      now,
+    });
+
+    if (shouldBlockPendingCustomer(agent, agentAccess) && validateApprovalCode(agent, message)) {
+      agentAccess = await approveCustomer(prisma, {
+        workspaceId,
+        agentId: agent.id,
+        customerId: customer.id,
+        approvedAt: now,
+        approvalCodeMatchedAt: now,
+      });
+      await syncApprovedCustomerToChannel({
+        channelId: channelRecord.id,
+        channelType: channelRecord.type,
+        phoneNumber: customer.phoneNumber,
+      }).catch(() => {});
+      approvalFlowHandled = true;
+      approvalReply = APPROVAL_SUCCESS_REPLY;
+    } else if (shouldBlockPendingCustomer(agent, agentAccess)) {
+      approvalFlowHandled = true;
+      approvalReply = sendPendingReply({
+        agent,
+        hasExistingPending: Boolean(existingAgentAccess?.id || customer.totalInteractions > 0),
+        invalidCode: invalidApprovalCode,
+      });
+    }
+  }
+
+  const desiredConversationStatus = resolveInboundConversationStatus(agent, agentAccess);
+
   // 5. Cari atau buat conversation aktif
   let conversation = await prisma.conversation.findFirst({
-    where: { customerId: customer.id, agentId: agent.id, status: 'ACTIVE' },
+    where: {
+      customerId: customer.id,
+      agentId: agent.id,
+      status: approvalFlowHandled ? { in: ['ACTIVE', 'NEEDS_ADMIN'] } : 'ACTIVE',
+    },
     orderBy: { createdAt: 'desc' },
   });
 
@@ -137,7 +204,15 @@ export async function handleIncoming(normalizedMsg, fastifyInstance) {
         agentId: agent.id,
         channelId: channelRecord.id,
         channelType: channelRecord.type,
-        status: 'ACTIVE',
+        status: desiredConversationStatus,
+      },
+    });
+  } else if (conversation.status !== desiredConversationStatus) {
+    conversation = await prisma.conversation.update({
+      where: { id: conversation.id },
+      data: {
+        status: desiredConversationStatus,
+        ...(desiredConversationStatus === 'ACTIVE' ? { endedAt: null } : {}),
       },
     });
   }
@@ -150,6 +225,51 @@ export async function handleIncoming(normalizedMsg, fastifyInstance) {
       content: message,
     },
   });
+
+  if (approvalFlowHandled) {
+    await prisma.message.create({
+      data: {
+        conversationId: conversation.id,
+        role: 'AI',
+        content: approvalReply,
+      },
+    });
+
+    if (shouldBlockPendingCustomer(agent, agentAccess)) {
+      io?.to(`workspace:${workspaceId}`).emit('chat:handoff_needed', {
+        conversationId: conversation.id,
+        customerId: customer.id,
+        customerName: customer.name,
+        lastMessage: message,
+        reason: 'APPROVAL_PENDING',
+      });
+    } else {
+      io?.to(`workspace:${workspaceId}`).emit('customer:approval_updated', {
+        customerId: customer.id,
+        agentId: agent.id,
+        status: 'ACTIVE',
+      });
+    }
+
+    io?.to(`workspace:${workspaceId}`).emit('chat:new_message', {
+      conversationId: conversation.id,
+      customerId: customer.id,
+      customerName: customer.name,
+      role: 'AI',
+      content: approvalReply,
+      timestamp: now.toISOString(),
+    });
+
+    try {
+      await ocSendChannelMessage(channelRecord.id, channelRecord.type, stripCustomerPhonePrefix(rawMeta.chatId), approvalReply, {
+        replyToId: rawMeta.messageId,
+      }, runtime);
+    } catch (err) {
+      log.error(err, 'openclaw outbound approval-flow send error');
+    }
+
+    return { conversationId: conversation.id, reply: approvalReply };
+  }
 
   // 7. Load 5 pesan terakhir sebagai context history (terbalik: oldest first)
   const recentMessages = await prisma.message.findMany({

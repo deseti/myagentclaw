@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import prisma from '../lib/prisma.js';
 import { authenticate } from '../middleware/auth.middleware.js';
@@ -35,6 +36,8 @@ const connectSchema = z.discriminatedUnion('type', [
 
 const whatsappLinkSchema = z.object({
   force: z.boolean().optional(),
+  forceFreshLogin: z.boolean().optional(),
+  agentId: z.string().min(1).optional(),
 });
 
 const RESTORE_SESSION_TIMEOUT_MS = 10000;
@@ -42,6 +45,7 @@ const AUTO_FORCE_NEW_QR_AFTER_MS = 15000;
 const FORCE_START_TIMEOUT_MS = 45000;
 const RESTORE_SESSION_MESSAGE = 'Mencoba mengaktifkan sesi WhatsApp lama.';
 const FORCE_NEW_QR_MESSAGE = 'Restore session terlalu lama, sistem membuat QR baru...';
+const MANUAL_FRESH_LOGIN_MESSAGE = 'Memulai login WhatsApp baru khusus agent ini.';
 
 function normalizeLinkState(value) {
   return String(value || '').trim().toUpperCase();
@@ -102,6 +106,156 @@ function buildWhatsAppDebugState(channel, patch = {}) {
       : sessionData.forceQrTriggered === true,
     qrGenerationStartedAt,
   };
+}
+
+function normalizeWhatsAppSessionSegment(value, fallback = 'unassigned') {
+  const normalized = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+
+  return normalized || fallback;
+}
+
+function buildWhatsAppSessionIdentity(channel = {}) {
+  const agentId = String(channel?.agentId || channel?.agent?.id || '').trim();
+  const agentSegment = normalizeWhatsAppSessionSegment(agentId);
+
+  return {
+    loginOwnerAgentId: agentId || null,
+    authNamespace: `agent-${agentSegment}/whatsapp`,
+    runtimeSessionId: `runtime-agent-${agentSegment}-whatsapp`,
+    adapterSessionId: `adapter-agent-${agentSegment}-whatsapp`,
+  };
+}
+
+function resolveWhatsAppAuthDir(authNamespace) {
+  const normalized = String(authNamespace || '')
+    .trim()
+    .replace(/^\/+/, '')
+    .replace(/\/{2,}/g, '/');
+
+  return normalized ? `auth/${normalized}` : null;
+}
+
+function buildWhatsAppGatewayAgentConfig(channel, agent) {
+  const sessionData = buildMergedSessionData(channel, {});
+  const sessionIdentity = buildWhatsAppSessionIdentity(channel);
+
+  return buildGatewayAgentConfig(agent, {
+    channelType: CHANNEL_TYPES.WHATSAPP,
+    whatsappAuthNamespace: sessionData.authNamespace || sessionIdentity.authNamespace,
+    runtimeSessionId: sessionData.runtimeSessionId || sessionIdentity.runtimeSessionId,
+    adapterSessionId: sessionData.adapterSessionId || sessionIdentity.adapterSessionId,
+  });
+}
+
+function buildPreviousWhatsAppSessionState(channel = {}) {
+  const sessionData = channel?.sessionData || {};
+
+  return {
+    previousAuthNamespace: typeof sessionData.authNamespace === 'string' && sessionData.authNamespace.trim()
+      ? sessionData.authNamespace.trim()
+      : null,
+    previousRuntimeSessionId: typeof sessionData.runtimeSessionId === 'string' && sessionData.runtimeSessionId.trim()
+      ? sessionData.runtimeSessionId.trim()
+      : null,
+    previousAdapterSessionId: typeof sessionData.adapterSessionId === 'string' && sessionData.adapterSessionId.trim()
+      ? sessionData.adapterSessionId.trim()
+      : null,
+  };
+}
+
+function createFreshWhatsAppSessionIdentity(channel = {}) {
+  const baseIdentity = buildWhatsAppSessionIdentity(channel);
+  const agentId = baseIdentity.loginOwnerAgentId || String(channel?.agentId || channel?.agent?.id || '').trim();
+  const agentSegment = normalizeWhatsAppSessionSegment(agentId);
+  const freshRuntimeSessionId = randomUUID();
+  const freshAdapterSessionId = randomUUID();
+  const freshAuthNamespace = `agent-${agentSegment}-whatsapp-${Date.now()}`;
+
+  return {
+    loginOwnerAgentId: agentId || null,
+    authNamespace: freshAuthNamespace,
+    runtimeSessionId: freshRuntimeSessionId,
+    adapterSessionId: freshAdapterSessionId,
+  };
+}
+
+async function prepareFreshWhatsAppLoginChannel(channel, logger = console) {
+  const previousState = buildPreviousWhatsAppSessionState(channel);
+  const nextIdentity = createFreshWhatsAppSessionIdentity(channel);
+  const requestedAt = new Date().toISOString();
+  const nextAuthDir = resolveWhatsAppAuthDir(nextIdentity.authNamespace);
+
+  console.log('[Fresh Login] Step 4: Generate new namespace', {
+    agentId: channel.agentId,
+    channelId: channel.id,
+    authNamespace: nextIdentity.authNamespace,
+    runtimeSessionId: nextIdentity.runtimeSessionId,
+    adapterSessionId: nextIdentity.adapterSessionId,
+  });
+  console.log('[Fresh Login] Step 5: Build new auth folder', {
+    agentId: channel.agentId,
+    channelId: channel.id,
+    authNamespace: nextIdentity.authNamespace,
+    authDir: nextAuthDir,
+  });
+
+  logger.info({
+    channelId: channel.id,
+    agentId: channel.agentId,
+    ...previousState,
+  }, 'Fresh login requested');
+
+  const updated = await prisma.channel.update({
+    where: { id: channel.id },
+    data: {
+      status: 'CONNECTING',
+      sessionData: buildMergedSessionData(channel, {
+        ...nextIdentity,
+        connected: false,
+        linkState: 'FORCE_NEW_QR',
+        loginStrategy: 'FRESH',
+        statusMessage: MANUAL_FRESH_LOGIN_MESSAGE,
+        lastLinkMessage: MANUAL_FRESH_LOGIN_MESSAGE,
+        lastError: null,
+        lastErrorCode: null,
+        qrIssuedAt: null,
+        qrDataUrl: null,
+        qrExpiresAt: null,
+        pairingCode: null,
+        pairingPhoneNumber: null,
+        pairingInstructions: null,
+        adapterError: null,
+        reconnectStartedAt: requestedAt,
+        reconnectElapsedMs: 0,
+        restoreAttemptCount: Math.max(1, Number(channel.sessionData?.restoreAttemptCount || 0) + 1),
+        lastRestoreError: 'Fresh login diminta manual.',
+        forceQrTriggered: true,
+        qrGenerationStartedAt: requestedAt,
+        rawRuntimePayload: sanitizeQrPayload({
+          freshLoginRequestedAt: requestedAt,
+          ...previousState,
+          newAuthNamespace: nextIdentity.authNamespace,
+          newRuntimeSessionId: nextIdentity.runtimeSessionId,
+          newAdapterSessionId: nextIdentity.adapterSessionId,
+        }),
+      }),
+    },
+  });
+
+  logger.info({
+    channelId: channel.id,
+    agentId: channel.agentId,
+    ...previousState,
+    authNamespace: nextIdentity.authNamespace,
+    runtimeSessionId: nextIdentity.runtimeSessionId,
+    adapterSessionId: nextIdentity.adapterSessionId,
+  }, 'New auth namespace created');
+
+  return { updated, previousState };
 }
 
 function shouldAutoForceNewQr(channel, snapshot = null) {
@@ -218,6 +372,7 @@ function classifyWhatsAppTransportFailure(error) {
 
 function buildMergedSessionData(channel, patch = {}) {
   return {
+    ...(channel?.type === CHANNEL_TYPES.WHATSAPP ? buildWhatsAppSessionIdentity(channel) : {}),
     ...(channel.sessionData || {}),
     ...patch,
   };
@@ -350,6 +505,7 @@ function buildChannelPayload(channel, overrides = {}) {
   const sessionData = buildMergedSessionData(channel, overrideSessionData || {});
   const status = restOverrides.status || channel.status;
   const agentStatus = restOverrides.agentStatus || channel.agent?.status || restOverrides.agentStatus || 'ACTIVE';
+  const sessionIdentity = channel?.type === CHANNEL_TYPES.WHATSAPP ? buildWhatsAppSessionIdentity(channel) : null;
   const runtimeStatus = restOverrides.runtimeStatus || resolveChannelRuntimeStatus({
     ...channel,
     status,
@@ -358,6 +514,7 @@ function buildChannelPayload(channel, overrides = {}) {
 
   return {
     id: channel.id,
+    agentId: channel.agentId || channel.agent?.id || null,
     type: channel.type,
     status,
     ...('botUsername' in sessionData ? { botUsername: sessionData.botUsername || null } : {}),
@@ -388,6 +545,13 @@ function buildChannelPayload(channel, overrides = {}) {
     linked: sessionData.linked ?? null,
     connected: sessionData.connected ?? null,
     linkState: sessionData.linkState || null,
+    ...(sessionIdentity ? {
+      loginOwnerAgentId: sessionData.loginOwnerAgentId || sessionIdentity.loginOwnerAgentId,
+      authNamespace: sessionData.authNamespace || sessionIdentity.authNamespace,
+      runtimeSessionId: sessionData.runtimeSessionId || sessionIdentity.runtimeSessionId,
+      adapterSessionId: sessionData.adapterSessionId || sessionIdentity.adapterSessionId,
+      loginStrategy: sessionData.loginStrategy || null,
+    } : {}),
     lastError: sessionData.lastError || null,
     lastErrorCode: sessionData.lastErrorCode || null,
     lastLinkMessage: sessionData.lastLinkMessage || null,
@@ -700,6 +864,41 @@ async function ensureWhatsAppLinkedState(channel, agent, runtime, force = false,
 
   let workingChannel = channel;
   const reconnectStartedAt = workingChannel.sessionData?.reconnectStartedAt || new Date().toISOString();
+  const buildLinkStartOptions = (forceLogin) => {
+    const nextOptions = {
+      agentId: agent.id,
+      force: forceLogin,
+      forceFreshLogin: options.forceFreshLogin === true,
+      authNamespace: workingChannel.sessionData?.authNamespace || buildWhatsAppSessionIdentity(workingChannel).authNamespace,
+      runtimeSessionId: workingChannel.sessionData?.runtimeSessionId || buildWhatsAppSessionIdentity(workingChannel).runtimeSessionId,
+      adapterSessionId: workingChannel.sessionData?.adapterSessionId || buildWhatsAppSessionIdentity(workingChannel).adapterSessionId,
+      previousAuthNamespace: options.previousAuthNamespace || null,
+      previousRuntimeSessionId: options.previousRuntimeSessionId || null,
+      previousAdapterSessionId: options.previousAdapterSessionId || null,
+      previousAuthDir: resolveWhatsAppAuthDir(options.previousAuthNamespace),
+      timeoutMs: forceLogin ? FORCE_START_TIMEOUT_MS : RESTORE_SESSION_TIMEOUT_MS,
+    };
+
+    if (options.forceFreshLogin === true) {
+      if (!nextOptions.authNamespace || !nextOptions.runtimeSessionId || !nextOptions.adapterSessionId) {
+        const error = new Error('Fresh login membutuhkan authNamespace, runtimeSessionId, dan adapterSessionId baru.');
+        error.statusCode = 409;
+        throw error;
+      }
+
+      if (
+        nextOptions.authNamespace === nextOptions.previousAuthNamespace
+        || nextOptions.runtimeSessionId === nextOptions.previousRuntimeSessionId
+        || nextOptions.adapterSessionId === nextOptions.previousAdapterSessionId
+      ) {
+        const error = new Error('Fresh login masih memakai state runtime lama.');
+        error.statusCode = 409;
+        throw error;
+      }
+    }
+
+    return nextOptions;
+  };
 
   if (!workingChannel.sessionData?.reconnectStartedAt) {
     workingChannel = await prisma.channel.update({
@@ -724,12 +923,22 @@ async function ensureWhatsAppLinkedState(channel, agent, runtime, force = false,
     });
   }
 
+  if (options.forceFreshLogin === true) {
+    console.log('[Fresh Login] Step 6: Create runtime session', {
+      agentId: agent.id,
+      channelId: channel.id,
+      authNamespace: workingChannel.sessionData?.authNamespace || null,
+      runtimeSessionId: workingChannel.sessionData?.runtimeSessionId || null,
+      adapterSessionId: workingChannel.sessionData?.adapterSessionId || null,
+    });
+  }
+
   await ocStartChannel(
     channel.id,
     CHANNEL_TYPES.WHATSAPP,
     {},
     channel.agentId,
-    buildGatewayAgentConfig(agent, { channelType: CHANNEL_TYPES.WHATSAPP }),
+    buildWhatsAppGatewayAgentConfig(workingChannel, agent),
     runtime,
   );
 
@@ -883,10 +1092,7 @@ async function ensureWhatsAppLinkedState(channel, agent, runtime, force = false,
   }
 
   try {
-    loginResult = await ocStartWhatsAppLink(channel.id, {
-      force,
-      timeoutMs: force ? FORCE_START_TIMEOUT_MS : RESTORE_SESSION_TIMEOUT_MS,
-    }, runtime);
+    loginResult = await ocStartWhatsAppLink(channel.id, buildLinkStartOptions(force), runtime);
     logWhatsAppDebug(logger, 'adapter-start-response', channel.id, loginResult, { force, usedForceFallback });
   } catch (error) {
     const classified = classifyWhatsAppTransportFailure(error);
@@ -906,10 +1112,7 @@ async function ensureWhatsAppLinkedState(channel, agent, runtime, force = false,
         message: forceMessage,
         rawRuntimePayload: sanitizeQrPayload(classified.payload?.rawRuntimePayload || classified.payload || { message: error?.message || String(error) }),
       });
-      loginResult = await ocStartWhatsAppLink(channel.id, {
-        force: true,
-        timeoutMs: FORCE_START_TIMEOUT_MS,
-      }, runtime);
+      loginResult = await ocStartWhatsAppLink(channel.id, buildLinkStartOptions(true), runtime);
       logWhatsAppDebug(logger, 'adapter-start-force-response', channel.id, loginResult, { force: true, reason: classified.code });
     } else {
       const updatedChannel = await persistWhatsAppFailureState(workingChannel, classified, {
@@ -955,10 +1158,7 @@ async function ensureWhatsAppLinkedState(channel, agent, runtime, force = false,
         rawRuntimePayload: sanitizeQrPayload(statusProbe?.rawRuntimePayload || statusProbe || loginResult || null),
       });
 
-      const forcedResult = await ocStartWhatsAppLink(channel.id, {
-        force: true,
-        timeoutMs: FORCE_START_TIMEOUT_MS,
-      }, runtime);
+      const forcedResult = await ocStartWhatsAppLink(channel.id, buildLinkStartOptions(true), runtime);
       logWhatsAppDebug(logger, 'adapter-force-after-missing-qr', channel.id, forcedResult, { reason: 'missing_qr_after_restore' });
 
       const forcedStatusProbe = await waitForWhatsAppAccountSnapshot(runtime, channel.id, 3, 1500).catch(() => null);
@@ -1158,10 +1358,12 @@ export default async function channelRoute(fastify) {
           tokenHash: Buffer.from(botToken).toString('base64'),
         }
         : {
+          ...buildWhatsAppSessionIdentity({ agentId }),
           linked: false,
           connected: false,
           linkState: 'CONNECTING',
-          statusMessage: 'Menyiapkan login WhatsApp.',
+          loginStrategy: 'RECONNECT',
+          statusMessage: 'Menyiapkan sesi WhatsApp khusus agent ini.',
           lastError: null,
           lastErrorCode: null,
           lastLinkMessage: null,
@@ -1284,6 +1486,11 @@ export default async function channelRoute(fastify) {
   fastify.post('/:id/reconnect', async (request, reply) => {
     const { ownerId } = request.user;
     const { id } = request.params;
+    const parsed = whatsappLinkSchema.safeParse(request.body || {});
+
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Validation error', details: parsed.error.flatten().fieldErrors });
+    }
 
     const channel = await prisma.channel.findFirst({
       where: { id, agent: { workspace: { ownerId } } },
@@ -1315,35 +1522,47 @@ export default async function channelRoute(fastify) {
       });
     }
 
+    if (parsed.data.agentId && parsed.data.agentId !== channel.agentId) {
+      return reply.code(409).send({ error: 'Conflict', message: 'Channel tidak cocok dengan agent yang dipilih' });
+    }
+
+    const forceFreshLogin = channel.type === CHANNEL_TYPES.WHATSAPP
+      && (parsed.data.forceFreshLogin === true || parsed.data.force === true);
+    const reconnectMessage = forceFreshLogin ? MANUAL_FRESH_LOGIN_MESSAGE : RESTORE_SESSION_MESSAGE;
+    let freshLoginState = null;
+
     const reconnectingChannel = channel.type === CHANNEL_TYPES.WHATSAPP
-      ? await prisma.channel.update({
-          where: { id: channel.id },
-          data: {
-            status: 'CONNECTING',
-            sessionData: buildMergedSessionData(channel, {
-              connected: false,
-              linkState: 'RECONNECTING',
-              statusMessage: RESTORE_SESSION_MESSAGE,
-              lastLinkMessage: RESTORE_SESSION_MESSAGE,
-              lastError: null,
-              lastErrorCode: null,
-              qrIssuedAt: null,
-              qrDataUrl: null,
-              qrExpiresAt: null,
-              pairingCode: null,
-              pairingPhoneNumber: null,
-              pairingInstructions: null,
-              adapterError: null,
-              rawRuntimePayload: null,
-              reconnectStartedAt: new Date().toISOString(),
-              reconnectElapsedMs: 0,
-              restoreAttemptCount: Math.max(1, Number(channel.sessionData?.restoreAttemptCount || 0) + 1),
-              lastRestoreError: null,
-              forceQrTriggered: false,
-              qrGenerationStartedAt: null,
-            }),
-          },
-        })
+      ? forceFreshLogin
+        ? ((freshLoginState = await prepareFreshWhatsAppLoginChannel(channel, fastify.log)), freshLoginState.updated)
+        : await prisma.channel.update({
+            where: { id: channel.id },
+            data: {
+              status: 'CONNECTING',
+              sessionData: buildMergedSessionData(channel, {
+                connected: false,
+                linkState: 'RECONNECTING',
+                loginStrategy: 'RECONNECT',
+                statusMessage: reconnectMessage,
+                lastLinkMessage: reconnectMessage,
+                lastError: null,
+                lastErrorCode: null,
+                qrIssuedAt: null,
+                qrDataUrl: null,
+                qrExpiresAt: null,
+                pairingCode: null,
+                pairingPhoneNumber: null,
+                pairingInstructions: null,
+                adapterError: null,
+                rawRuntimePayload: null,
+                reconnectStartedAt: new Date().toISOString(),
+                reconnectElapsedMs: 0,
+                restoreAttemptCount: Math.max(1, Number(channel.sessionData?.restoreAttemptCount || 0) + 1),
+                lastRestoreError: null,
+                forceQrTriggered: false,
+                qrGenerationStartedAt: null,
+              }),
+            },
+          })
       : channel;
 
     if (channel.type === CHANNEL_TYPES.WHATSAPP) {
@@ -1356,6 +1575,16 @@ export default async function channelRoute(fastify) {
       const cleanupTargets = listCandidateAdapterUrls(channel.agent.workspace)
         .filter((adapterUrl) => adapterUrl !== runtime.adapterUrl)
         .map((adapterUrl) => ({ adapterUrl }));
+
+      if (forceFreshLogin) {
+        await ocStopChannel(channel.id, channel.type, runtime).catch(() => {});
+        fastify.log.info({
+          channelId: channel.id,
+          agentId: channel.agentId,
+          previousRuntimeSessionId: freshLoginState?.previousState?.previousRuntimeSessionId || null,
+          previousAdapterSessionId: freshLoginState?.previousState?.previousAdapterSessionId || null,
+        }, 'Old runtime removed');
+      }
 
       for (const target of cleanupTargets) {
         await ocStopChannel(channel.id, channel.type, target).catch(() => {});
@@ -1394,7 +1623,21 @@ export default async function channelRoute(fastify) {
           channel: buildChannelPayload(updatedChannel, { agentStatus: channel.agent.status }),
         });
       }
-      const { channel: updatedChannel, loginResult, snapshot: linkSnapshot } = await ensureWhatsAppLinkedState(reconnectingChannel, channel.agent, runtime, false, fastify.log);
+      const { channel: updatedChannel, loginResult, snapshot: linkSnapshot } = await ensureWhatsAppLinkedState(
+        reconnectingChannel,
+        channel.agent,
+        runtime,
+        forceFreshLogin,
+        fastify.log,
+        forceFreshLogin
+          ? {
+              forceFreshLogin: true,
+              forceReason: 'Fresh login diminta manual.',
+              forceMessage: MANUAL_FRESH_LOGIN_MESSAGE,
+              ...freshLoginState.previousState,
+            }
+          : {},
+      );
 
       logWhatsAppDebug(fastify.log, 'route-reconnect-response', channel.id, {
         ...loginResult,
@@ -1463,6 +1706,10 @@ export default async function channelRoute(fastify) {
       return reply.code(400).send({ error: 'Validation error', details: parsed.error.flatten().fieldErrors });
     }
 
+    if (parsed.data.forceFreshLogin === true) {
+      console.log('[Fresh Login] Step 1: Find channel');
+    }
+
     const channel = await prisma.channel.findFirst({
       where: { id, agent: { workspace: { ownerId } } },
       include: {
@@ -1478,6 +1725,10 @@ export default async function channelRoute(fastify) {
       return reply.code(404).send({ error: 'Not Found', message: 'Channel tidak ditemukan' });
     }
 
+    if (parsed.data.agentId && parsed.data.agentId !== channel.agentId) {
+      return reply.code(409).send({ error: 'Conflict', message: 'Channel tidak cocok dengan agent yang dipilih' });
+    }
+
     if (channel.type !== CHANNEL_TYPES.WHATSAPP) {
       return reply.code(409).send({ error: 'Conflict', message: 'QR login hanya tersedia untuk channel WhatsApp' });
     }
@@ -1490,15 +1741,44 @@ export default async function channelRoute(fastify) {
       return reply.code(409).send({ error: 'Conflict', message: 'Channel sedang disconnected. Gunakan reconnect terlebih dahulu.' });
     }
 
+    const forceFreshLogin = parsed.data.forceFreshLogin === true;
+    const shouldForceStart = forceFreshLogin || Boolean(parsed.data.force);
+    let workingChannel = channel;
+    let freshLoginState = null;
+
     try {
-      fastify.log.info({ channelId: channel.id, force: Boolean(parsed.data.force) }, 'Starting WhatsApp link flow');
+      fastify.log.info({ channelId: channel.id, force: Boolean(parsed.data.force), forceFreshLogin }, 'Starting WhatsApp link flow');
       const runtime = await ensureWorkspaceRuntime(channel.agent.workspace);
+
+      if (forceFreshLogin) {
+        console.log('[Fresh Login] Step 2: Remove old runtime');
+        await ocStopChannel(channel.id, channel.type, runtime).catch(() => {});
+        fastify.log.info({
+          channelId: channel.id,
+          agentId: channel.agentId,
+          previousRuntimeSessionId: workingChannel.sessionData?.runtimeSessionId || null,
+          previousAdapterSessionId: workingChannel.sessionData?.adapterSessionId || null,
+        }, 'Old runtime removed');
+
+        freshLoginState = await prepareFreshWhatsAppLoginChannel(channel, fastify.log);
+        workingChannel = freshLoginState.updated;
+        emitChannelUpdate(fastify.io, workingChannel, channel.agent.status, 'updated');
+      }
+
       const { channel: updatedChannel, loginResult, snapshot } = await ensureWhatsAppLinkedState(
-        channel,
+        workingChannel,
         channel.agent,
         runtime,
-        Boolean(parsed.data.force),
+        shouldForceStart,
         fastify.log,
+        forceFreshLogin
+          ? {
+              forceFreshLogin: true,
+              forceReason: 'Fresh login diminta manual.',
+              forceMessage: MANUAL_FRESH_LOGIN_MESSAGE,
+              ...freshLoginState.previousState,
+            }
+          : {},
       );
 
       logWhatsAppDebug(fastify.log, 'route-link-start-response', channel.id, {
@@ -1524,8 +1804,19 @@ export default async function channelRoute(fastify) {
         }),
       });
     } catch (err) {
+      if (forceFreshLogin) {
+        console.error('[Fresh Login] Failed', {
+          message: err?.message || String(err),
+          stack: err?.stack || null,
+          agentId: channel.agentId,
+          channelId: channel.id,
+          runtimeSessionId: workingChannel.sessionData?.runtimeSessionId || null,
+          adapterSessionId: workingChannel.sessionData?.adapterSessionId || null,
+        });
+      }
+
       const classified = classifyWhatsAppTransportFailure(err);
-      const failedChannel = await persistWhatsAppFailureState(channel, classified, {
+      const failedChannel = await persistWhatsAppFailureState(workingChannel, classified, {
         lastLinkMessage: classified.userMessage,
         adapterError: err?.payload?.adapterError || err?.message || null,
         rawRuntimePayload: sanitizeQrPayload(err?.payload?.rawRuntimePayload || err?.payload || { message: err?.message || String(err) }),

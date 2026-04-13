@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Image from 'next/image';
 import {
   AlertCircle,
@@ -89,10 +89,16 @@ function syncLinkDialogState(channel, payload = {}, current = null) {
     waiting: false,
     refreshing: false,
     checking: false,
+    actionBusy: current?.actionBusy || '',
     agentName: channel?.agentName || current?.agentName || '',
+    agentId: channel?.agentId || payloadChannel.agentId || current?.agentId || '',
     state: nextState,
     runtimeStatus: nextRuntimeStatus,
     linkState: nextLinkState,
+    loginStrategy: payload.loginStrategy || payloadChannel.loginStrategy || channel?.loginStrategy || current?.loginStrategy || '',
+    authNamespace: payload.authNamespace || payloadChannel.authNamespace || channel?.authNamespace || current?.authNamespace || '',
+    runtimeSessionId: payload.runtimeSessionId || payloadChannel.runtimeSessionId || channel?.runtimeSessionId || current?.runtimeSessionId || '',
+    adapterSessionId: payload.adapterSessionId || payloadChannel.adapterSessionId || channel?.adapterSessionId || current?.adapterSessionId || '',
     code: payload.code || channel?.lastErrorCode || current?.code || '',
     qrExpiresAt: payload.qrExpiresAt || payloadChannel.qrExpiresAt || channel?.qrExpiresAt || current?.qrExpiresAt || '',
     pairingCode: payload.pairingCode || payloadChannel.pairingCode || channel?.pairingCode || current?.pairingCode || '',
@@ -212,6 +218,68 @@ function formatQrExpiry(value) {
   }).format(date);
 }
 
+function normalizeWhatsappState(value) {
+  return String(value || '').trim().toUpperCase();
+}
+
+function buildWhatsappWaitFingerprint(dialog = {}) {
+  if (!dialog?.channelId) {
+    return '';
+  }
+
+  return [
+    dialog.channelId,
+    normalizeWhatsappState(dialog.runtimeStatus || dialog.state),
+    normalizeWhatsappState(dialog.linkState),
+    dialog.qrScannedAt || '',
+    dialog.sessionPersistedAt || '',
+    dialog.browserConnectedAt || '',
+    dialog.authStateLoadedAt || '',
+    dialog.socketConnectedAt || '',
+    dialog.loginFailureReason || '',
+    dialog.lastDisconnectReason || '',
+    dialog.lastSocketError || '',
+    dialog.message || '',
+  ].join('::');
+}
+
+function shouldWaitForWhatsappCompletion(dialog = {}) {
+  if (!dialog?.open || !dialog?.channelId) {
+    return false;
+  }
+
+  if (dialog.waiting || dialog.refreshing || dialog.checking || dialog.actionBusy) {
+    return false;
+  }
+
+  const runtimeStatus = normalizeWhatsappState(dialog.runtimeStatus || dialog.state);
+  const linkState = normalizeWhatsappState(dialog.linkState);
+  const message = String(dialog.message || '').toLowerCase();
+
+  if (runtimeStatus === 'CONNECTED' || linkState === 'CONNECTED') {
+    return false;
+  }
+
+  if (message.includes('expired') || message.includes('kedaluwarsa') || message.includes('buat qr baru')) {
+    return false;
+  }
+
+  if (dialog.qrDataUrl && !dialog.qrScannedAt && !dialog.sessionPersistedAt) {
+    return false;
+  }
+
+  return Boolean(
+    dialog.qrScannedAt
+    || dialog.sessionPersistedAt
+    || dialog.authStateLoadedAt
+    || dialog.browserConnectedAt
+    || dialog.socketConnectedAt
+    || ['QR_SCANNED', 'AUTH_LOADING', 'SESSION_SAVING', 'WAITING_SOCKET_CONNECT'].includes(runtimeStatus)
+    || ['QR_SCANNED', 'AUTH_LOADING', 'SESSION_SAVING', 'WAITING_SOCKET_CONNECT'].includes(linkState)
+    || (runtimeStatus === 'LOGIN_FAILED' && (dialog.loginFailureReason || dialog.lastSocketError || dialog.lastDisconnectReason))
+  );
+}
+
 export default function ChannelsPage() {
   const [agents, setAgents] = useState([]);
   const [channels, setChannels] = useState([]);
@@ -234,10 +302,16 @@ export default function ChannelsPage() {
     waiting: false,
     refreshing: false,
     checking: false,
+    actionBusy: '',
     agentName: '',
+    agentId: '',
     state: 'CONNECTING',
     runtimeStatus: 'CONNECTING',
     linkState: '',
+    loginStrategy: '',
+    authNamespace: '',
+    runtimeSessionId: '',
+    adapterSessionId: '',
     code: '',
     qrExpiresAt: '',
     pairingCode: '',
@@ -265,12 +339,15 @@ export default function ChannelsPage() {
     lastSocketError: '',
     lastConnectionUpdate: null,
   });
+  const lastWaitFingerprintRef = useRef('');
 
   function openLinkDialog(channel, payload = {}) {
+    lastWaitFingerprintRef.current = '';
     setLinkDialog((current) => syncLinkDialogState(channel, payload, current));
   }
 
   function closeLinkDialog() {
+    lastWaitFingerprintRef.current = '';
     setLinkDialog({
       open: false,
       channelId: '',
@@ -279,10 +356,16 @@ export default function ChannelsPage() {
       waiting: false,
       refreshing: false,
       checking: false,
+      actionBusy: '',
       agentName: '',
+      agentId: '',
       state: 'CONNECTING',
       runtimeStatus: 'CONNECTING',
       linkState: '',
+      loginStrategy: '',
+      authNamespace: '',
+      runtimeSessionId: '',
+      adapterSessionId: '',
       code: '',
       qrExpiresAt: '',
       pairingCode: '',
@@ -340,7 +423,7 @@ export default function ChannelsPage() {
       const channelLists = await Promise.all(
         agentList.map((agent) =>
           api.get('/channels', { params: { agentId: agent.id } })
-            .then((response) => (response.data.channels ?? response.data ?? []).map((channel) => ({ ...channel, agentName: agent.name })))
+            .then((response) => (response.data.channels ?? response.data ?? []).map((channel) => ({ ...channel, agentName: agent.name, agentId: agent.id })))
             .catch(() => [])
         )
       );
@@ -376,7 +459,7 @@ export default function ChannelsPage() {
         setLinkDialog((current) => syncLinkDialogState(latestChannel, data, current));
       }
 
-      if (data.message) {
+      if (data.message && !silent) {
         setNotice(data.message);
       }
 
@@ -396,6 +479,62 @@ export default function ChannelsPage() {
       if (!silent) {
         setLinkDialog((current) => ({ ...current, checking: false }));
       }
+    }
+  }
+
+  async function waitForWhatsappCompletion(channelId, options = {}) {
+    const { silent = false } = options;
+    if (!channelId) return;
+
+    setLinkDialog((current) => ({
+      ...current,
+      waiting: true,
+      message: current.sessionPersistedAt
+        ? 'Sesi WhatsApp sudah tersimpan. Menyelesaikan sinkronisasi perangkat...'
+        : current.qrScannedAt
+        ? 'QR berhasil dipindai. Menyambungkan sesi WhatsApp...'
+        : current.message || 'Menunggu sinkronisasi sesi WhatsApp...',
+    }));
+
+    try {
+      const { data } = await api.post(`/channels/${channelId}/link/wait`);
+      const latestChannel = data.channel ? { ...data.channel, agentName: linkDialog.agentName } : null;
+
+      if (data.connected) {
+        setNotice(data.message || 'WhatsApp berhasil terhubung.');
+        closeLinkDialog();
+        await load({ silent: true });
+        return;
+      }
+
+      if (latestChannel) {
+        setLinkDialog((current) => syncLinkDialogState(latestChannel, data, current));
+      } else {
+        setLinkDialog((current) => ({
+          ...current,
+          waiting: false,
+          message: data.message || current.message,
+        }));
+      }
+
+      if (data.message && !silent) {
+        setNotice(data.message);
+      }
+
+      await load({ silent: true });
+    } catch (err) {
+      const message = getErrorMessage(err, 'Gagal menunggu sinkronisasi login WhatsApp');
+      const payload = err?.response?.data;
+      const payloadChannel = payload?.channel;
+      setLinkDialog((current) => {
+        if (payloadChannel) {
+          return syncLinkDialogState({ ...payloadChannel, agentName: current.agentName }, payload, current);
+        }
+        return { ...current, waiting: false, message };
+      });
+      setError(message);
+    } finally {
+      setLinkDialog((current) => ({ ...current, waiting: false }));
     }
   }
 
@@ -423,7 +562,7 @@ export default function ChannelsPage() {
   });
 
   useEffect(() => {
-    if (!linkDialog.open || !linkDialog.channelId) {
+    if (!linkDialog.open || !linkDialog.channelId || linkDialog.waiting) {
       return undefined;
     }
 
@@ -432,7 +571,22 @@ export default function ChannelsPage() {
     }, 4000);
 
     return () => window.clearInterval(intervalId);
-  }, [linkDialog.open, linkDialog.channelId]);
+  }, [linkDialog.open, linkDialog.channelId, linkDialog.waiting]);
+
+  useEffect(() => {
+    const fingerprint = buildWhatsappWaitFingerprint(linkDialog);
+
+    if (!fingerprint || !shouldWaitForWhatsappCompletion(linkDialog) || lastWaitFingerprintRef.current === fingerprint) {
+      return undefined;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      lastWaitFingerprintRef.current = fingerprint;
+      waitForWhatsappCompletion(linkDialog.channelId, { silent: true }).catch(() => {});
+    }, 600);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [linkDialog]);
 
   useEffect(() => {
     const shouldPoll = channels.some((channel) => channel.type === 'WHATSAPP' && (
@@ -511,6 +665,13 @@ export default function ChannelsPage() {
   };
 
   const handleReconnect = async (channel) => {
+    if (channel.type === 'WHATSAPP') {
+      openLinkDialog(channel, {
+        message: channel.statusMessage || 'Pilih reconnect session lama atau mulai login baru untuk agent ini.',
+      });
+      return;
+    }
+
     setReconnectingId(channel.id);
     setError('');
     setNotice('');
@@ -537,9 +698,51 @@ export default function ChannelsPage() {
     }
   };
 
+  const handleWhatsappLoginAction = async (mode) => {
+    if (!linkDialog.channelId) return;
+
+    const isFresh = mode === 'fresh';
+    lastWaitFingerprintRef.current = '';
+    setLinkDialog((current) => ({
+      ...current,
+      actionBusy: mode,
+      message: isFresh
+        ? 'Memulai login WhatsApp baru khusus agent ini.'
+        : 'Mencoba reconnect sesi WhatsApp milik agent ini.',
+    }));
+    setError('');
+    setNotice('');
+
+    try {
+      const { data } = await api.post(
+        isFresh ? `/channels/${linkDialog.channelId}/link/start` : `/channels/${linkDialog.channelId}/reconnect`,
+        isFresh ? { forceFreshLogin: true, agentId: linkDialog.agentId || undefined } : { agentId: linkDialog.agentId || undefined },
+      );
+      if (data.channel) {
+        setLinkDialog((current) => syncLinkDialogState({ ...data.channel, agentName: current.agentName }, data, current));
+      }
+      setNotice(data.message || (isFresh ? 'Login WhatsApp baru dimulai.' : 'Reconnect session WhatsApp dimulai.'));
+      await load({ silent: true });
+    } catch (err) {
+      const message = getErrorMessage(err, isFresh ? 'Gagal memulai login WhatsApp baru' : 'Gagal reconnect session WhatsApp');
+      const payload = err?.response?.data;
+      const payloadChannel = payload?.channel;
+      setLinkDialog((current) => {
+        if (payloadChannel) {
+          return syncLinkDialogState({ ...payloadChannel, agentName: current.agentName }, payload, current);
+        }
+        return { ...current, actionBusy: '', message };
+      });
+      setError(message);
+    } finally {
+      setLinkDialog((current) => ({ ...current, actionBusy: '' }));
+    }
+  };
+
   const handleRefreshWhatsappQr = async () => {
     if (!linkDialog.channelId) return;
 
+    lastWaitFingerprintRef.current = '';
     setLinkDialog((current) => ({ ...current, refreshing: true }));
     setError('');
 
@@ -565,6 +768,18 @@ export default function ChannelsPage() {
       });
       setError(message);
     }
+  };
+
+  const handleManualWhatsappStatusUpdate = async () => {
+    if (!linkDialog.channelId) return;
+
+    if (shouldWaitForWhatsappCompletion(linkDialog)) {
+      lastWaitFingerprintRef.current = '';
+      await waitForWhatsappCompletion(linkDialog.channelId);
+      return;
+    }
+
+    await refreshWhatsappStatus(linkDialog.channelId);
   };
 
   const handleDelete = async () => {
@@ -633,7 +848,7 @@ export default function ChannelsPage() {
       <div className="flex items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-white">Channel</h1>
-          <p className="mt-1 text-sm text-slate-400">Kelola Telegram bot dan reactivation WhatsApp tanpa membuat channel baru.</p>
+          <p className="mt-1 text-sm text-slate-400">Kelola Telegram bot dan login WhatsApp per agent tanpa mencampur sesi antar agent.</p>
         </div>
         <Button onClick={() => { setAddOpen(true); setAddError(''); setForm({ agentId: '', type: 'TELEGRAM', botToken: '' }); }}>
           <Plus className="mr-2 h-4 w-4" />
@@ -643,7 +858,7 @@ export default function ChannelsPage() {
 
       <Alert>
         <AlertDescription>
-          Saat WhatsApp diaktifkan lagi, sistem akan mencoba memakai session lama lebih dulu. Jika session lama tidak valid, UI akan otomatis mengarahkan ke QR login baru tanpa membuat channel duplikat atau menghapus histori lama.
+          Setiap agent memakai namespace sesi WhatsApp sendiri. Session lama milik agent lain tidak akan dipakai ulang, dan Anda bisa memilih reconnect session lama atau mulai login baru langsung dari modal QR.
         </AlertDescription>
       </Alert>
 
@@ -710,7 +925,7 @@ export default function ChannelsPage() {
                     {canReconnect ? (
                       <Button size="sm" variant="outline" onClick={() => handleReconnect(channel)} disabled={reconnectingId === channel.id}>
                         {reconnectingId === channel.id ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Power className="mr-2 h-4 w-4" />}
-                        Aktifkan Lagi
+                        {channel.type === 'WHATSAPP' ? 'Kelola Login' : 'Aktifkan Lagi'}
                       </Button>
                     ) : needsQrAttention ? (
                       <Button size="sm" variant="outline" onClick={() => openLinkDialog(channel, { message: channel.statusMessage || 'Lanjutkan proses login WhatsApp.' })}>
@@ -829,19 +1044,20 @@ export default function ChannelsPage() {
       </Dialog>
 
       <Dialog open={linkDialog.open} onOpenChange={(open) => { if (!open) closeLinkDialog(); }}>
-        <DialogContent className="border-slate-800 bg-slate-950 sm:max-w-2xl">
-          <DialogHeader>
-            <DialogTitle className="text-2xl font-semibold text-white">Scan QR WhatsApp</DialogTitle>
-            <DialogDescription>
-              {linkDialog.agentName
-                ? `Buka WhatsApp di HP Anda, masuk ke Linked Devices, lalu scan QR untuk agent ${linkDialog.agentName}.`
-                : 'Buka WhatsApp di HP Anda, masuk ke Linked Devices, lalu scan QR di bawah.'}
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-5 py-2">
-            <Alert className={['QR_EXPIRED', 'REQUIRES_QR', 'ERROR', 'LOGIN_FAILED'].includes(linkDialog.state) ? 'border-red-500/20 bg-red-500/10 text-red-50' : ''}>
-              <AlertDescription>{linkDialog.message || 'Buka WhatsApp → Linked Devices → Link a device, lalu scan QR di bawah.'}</AlertDescription>
-            </Alert>
+        <DialogContent className="max-h-[calc(100vh-2rem)] overflow-hidden border-slate-800 bg-slate-950 p-0 sm:max-h-[90vh] sm:max-w-2xl">
+          <div className="flex max-h-[calc(100vh-2rem)] flex-col sm:max-h-[90vh]">
+            <DialogHeader className="px-6 pb-0 pt-6">
+              <DialogTitle className="text-2xl font-semibold text-white">Scan QR WhatsApp</DialogTitle>
+              <DialogDescription>
+                {linkDialog.agentName
+                  ? `Buka WhatsApp di HP Anda, masuk ke Linked Devices, lalu scan QR untuk agent ${linkDialog.agentName}.`
+                  : 'Buka WhatsApp di HP Anda, masuk ke Linked Devices, lalu scan QR di bawah.'}
+              </DialogDescription>
+            </DialogHeader>
+            <div className="flex-1 space-y-5 overflow-y-auto px-6 py-4">
+              <Alert className={['QR_EXPIRED', 'REQUIRES_QR', 'ERROR', 'LOGIN_FAILED'].includes(linkDialog.state) ? 'border-red-500/20 bg-red-500/10 text-red-50' : ''}>
+                <AlertDescription>{linkDialog.message || 'Buka WhatsApp → Linked Devices → Link a device, lalu scan QR di bawah.'}</AlertDescription>
+              </Alert>
 
             <div className="rounded-[28px] border border-slate-800 bg-slate-900/80 p-4 shadow-2xl sm:p-5 lg:p-6">
               <div className="mx-auto flex w-full max-w-[480px] flex-col items-center gap-4 text-center">
@@ -887,18 +1103,48 @@ export default function ChannelsPage() {
                 <div className="w-full rounded-2xl border border-slate-800 bg-slate-950/80 px-4 py-3 text-left">
                   <div className="flex items-center justify-between gap-3">
                     <p className="text-sm font-medium text-white">Status realtime</p>
-                    {linkDialog.checking && <Loader2 className="h-4 w-4 animate-spin text-slate-400" />}
+                      {(linkDialog.checking || linkDialog.waiting) && <Loader2 className="h-4 w-4 animate-spin text-slate-400" />}
                   </div>
                   <p className="mt-2 text-sm text-slate-300">{linkDialog.message || 'Menunggu QR WhatsApp siap dipindai.'}</p>
+                  <p className="mt-2 text-xs text-slate-500">
+                    Login ini khusus untuk agent saat ini. Session dari agent lain tidak akan dipakai ulang.
+                  </p>
                   <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-slate-500">
                     <span>Diperbarui otomatis tiap beberapa detik</span>
                     {linkDialog.qrExpiresAt && <span>QR aktif sampai {formatQrExpiry(linkDialog.qrExpiresAt)}</span>}
                     {linkDialog.code && <span>Code: {linkDialog.code}</span>}
-                        {linkDialog.qrScannedAt && <span>QR dipindai {formatQrExpiry(linkDialog.qrScannedAt)}</span>}
-                        {linkDialog.sessionPersistedAt && <span>Sesi tersimpan {formatQrExpiry(linkDialog.sessionPersistedAt)}</span>}
+                    {linkDialog.qrScannedAt && <span>QR dipindai {formatQrExpiry(linkDialog.qrScannedAt)}</span>}
+                    {linkDialog.sessionPersistedAt && <span>Sesi tersimpan {formatQrExpiry(linkDialog.sessionPersistedAt)}</span>}
+                    {linkDialog.loginStrategy && <span>Mode: {linkDialog.loginStrategy === 'FRESH' ? 'Fresh Login' : 'Reconnect Existing Session'}</span>}
                     {linkDialog.forceQrTriggered && <span>Fallback QR baru sedang aktif</span>}
                   </div>
                 </div>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4">
+              <p className="text-sm font-semibold text-white">Pilih mode login</p>
+              <p className="mt-1 text-xs text-slate-400">
+                Reconnect memakai session WhatsApp yang tersimpan untuk agent ini. Start Fresh Login akan logout sesi lama agent ini dan membuat QR login baru.
+              </p>
+              <div className="mt-4 flex flex-col gap-3 sm:flex-row">
+                <Button
+                  variant="outline"
+                  className="flex-1"
+                  onClick={() => handleWhatsappLoginAction('reconnect')}
+                  disabled={linkDialog.actionBusy !== '' || linkDialog.refreshing || linkDialog.checking || linkDialog.waiting}
+                >
+                  {linkDialog.actionBusy === 'reconnect' && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                  Reconnect Existing Session
+                </Button>
+                <Button
+                  className="flex-1"
+                  onClick={() => handleWhatsappLoginAction('fresh')}
+                  disabled={linkDialog.actionBusy !== '' || linkDialog.refreshing || linkDialog.checking || linkDialog.waiting}
+                >
+                  {linkDialog.actionBusy === 'fresh' && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                  Start Fresh Login
+                </Button>
               </div>
             </div>
 
@@ -947,6 +1193,18 @@ export default function ChannelsPage() {
                   <div>
                     <p className="text-amber-200/70">restoreAttemptCount</p>
                     <p className="mt-1 font-mono">{linkDialog.restoreAttemptCount || 0}</p>
+                  </div>
+                  <div>
+                    <p className="text-amber-200/70">authNamespace</p>
+                    <p className="mt-1 break-all font-mono">{linkDialog.authNamespace || '-'}</p>
+                  </div>
+                  <div>
+                    <p className="text-amber-200/70">runtimeSessionId</p>
+                    <p className="mt-1 break-all font-mono">{linkDialog.runtimeSessionId || '-'}</p>
+                  </div>
+                  <div>
+                    <p className="text-amber-200/70">adapterSessionId</p>
+                    <p className="mt-1 break-all font-mono">{linkDialog.adapterSessionId || '-'}</p>
                   </div>
                   <div>
                     <p className="text-amber-200/70">forceQrTriggered</p>
@@ -1023,31 +1281,32 @@ export default function ChannelsPage() {
                 )}
               </div>
             )}
-          </div>
-          <DialogFooter className="gap-2 sm:justify-between">
-            <div className="flex flex-wrap gap-2">
-              <Button variant="outline" onClick={handleRefreshWhatsappQr} disabled={linkDialog.refreshing || linkDialog.waiting || linkDialog.checking}>
-                {linkDialog.refreshing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCcw className="mr-2 h-4 w-4" />}
-                Refresh QR
-              </Button>
-              {linkDialog.pairingCode && (
-                <Button variant="outline" onClick={copyPairingCode}>
-                  <Copy className="mr-2 h-4 w-4" />
-                  Copy Pairing Code
+            </div>
+            <DialogFooter className="gap-2 border-t border-slate-800 bg-slate-950 px-6 py-4 sm:justify-between">
+              <div className="flex flex-wrap gap-2">
+                <Button variant="outline" onClick={handleRefreshWhatsappQr} disabled={linkDialog.refreshing || linkDialog.waiting || linkDialog.checking}>
+                  {linkDialog.refreshing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCcw className="mr-2 h-4 w-4" />}
+                  Refresh QR
                 </Button>
-              )}
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <Button variant="outline" onClick={() => refreshWhatsappStatus(linkDialog.channelId)} disabled={linkDialog.checking || linkDialog.refreshing || linkDialog.waiting}>
-                {linkDialog.checking ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <SearchCheck className="mr-2 h-4 w-4" />}
-                Update Status
-              </Button>
-              <Button variant="ghost" onClick={closeLinkDialog}>
-                <X className="mr-2 h-4 w-4" />
-                Cancel
-              </Button>
-            </div>
-          </DialogFooter>
+                {linkDialog.pairingCode && (
+                  <Button variant="outline" onClick={copyPairingCode}>
+                    <Copy className="mr-2 h-4 w-4" />
+                    Copy Pairing Code
+                  </Button>
+                )}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button variant="outline" onClick={handleManualWhatsappStatusUpdate} disabled={linkDialog.checking || linkDialog.refreshing || linkDialog.waiting}>
+                  {(linkDialog.checking || linkDialog.waiting) ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <SearchCheck className="mr-2 h-4 w-4" />}
+                  Update Status
+                </Button>
+                <Button variant="ghost" onClick={closeLinkDialog}>
+                  <X className="mr-2 h-4 w-4" />
+                  Cancel
+                </Button>
+              </div>
+            </DialogFooter>
+          </div>
         </DialogContent>
       </Dialog>
     </div>

@@ -1,16 +1,31 @@
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { loadConfig } from 'openclaw/plugin-sdk/config-runtime';
+import { clearRuntimeConfigSnapshot, loadConfig } from 'openclaw/plugin-sdk/config-runtime';
 import { definePluginEntry } from 'openclaw/plugin-sdk/plugin-entry';
 
 const MAX_BODY_BYTES = 64 * 1024;
+const FRESH_LOGIN_CONFIG_SYNC_TIMEOUT_MS = 5000;
+const FRESH_LOGIN_CONFIG_SYNC_POLL_MS = 200;
 const WHATSAPP_PLUGIN_IDS = ['whatsapp', '@openclaw/whatsapp'];
-const ROUTES = {
-  start: '/api/myagentclaw/whatsapp/link/start',
-  wait: '/api/myagentclaw/whatsapp/link/wait',
-  status: '/api/myagentclaw/whatsapp/link/status',
-};
+const START_ROUTE_ALIASES = Object.freeze([
+  '/api/myagentclaw/whatsapp/link/start',
+  '/api/whatsapp/link/start',
+  '/channels/whatsapp/link/start',
+  '/api/link/start',
+]);
+const WAIT_ROUTE_ALIASES = Object.freeze([
+  '/api/myagentclaw/whatsapp/link/wait',
+  '/api/whatsapp/link/wait',
+  '/channels/whatsapp/link/wait',
+  '/api/link/wait',
+]);
+const STATUS_ROUTE_ALIASES = Object.freeze([
+  '/api/myagentclaw/whatsapp/link/status',
+  '/api/whatsapp/link/status',
+  '/channels/whatsapp/link/status',
+  '/api/link/status',
+]);
 const require = createRequire(import.meta.url);
 
 let whatsappRuntimePromise = null;
@@ -50,6 +65,20 @@ function summarizeQrPayload(payload = {}) {
 
 function logBridge(stage, details = {}) {
   console.log('[whatsapp-link-bridge]', stage, sanitizeQrPayload(details));
+}
+
+function resolveRequestPath(req) {
+  try {
+    return new URL(req?.url || '/', 'http://localhost').pathname;
+  } catch {
+    return String(req?.url || '/').split('?')[0] || '/';
+  }
+}
+
+function logRouteHit(req) {
+  const path = resolveRequestPath(req);
+  logBridge(`Route hit: ${path}`, { path, method: req?.method || 'GET' });
+  return path;
 }
 
 function resolveRuntimeStatuses(status = {}) {
@@ -144,11 +173,90 @@ async function readJsonBody(req) {
 }
 
 function readRequiredAccountId(body = {}) {
-  const accountId = typeof body.accountId === 'string' ? body.accountId.trim() : '';
+  const accountId = typeof body.accountId === 'string'
+    ? body.accountId.trim()
+    : typeof body.channelId === 'string'
+      ? body.channelId.trim()
+      : '';
   if (!accountId) {
     throw createHttpError(400, 'accountId diperlukan');
   }
   return accountId;
+}
+
+function readOptionalString(body = {}, key) {
+  const value = body?.[key];
+  return typeof value === 'string' && value.trim() ? value.trim() : '';
+}
+
+function waitMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function normalizeFreshAuthNamespace(value) {
+  return String(value || '')
+    .trim()
+    .replace(/^\/+/, '')
+    .replace(/\/{2,}/g, '/');
+}
+
+function resolveFreshAuthDir(authNamespace) {
+  const normalized = normalizeFreshAuthNamespace(authNamespace);
+  return normalized ? `auth/${normalized}` : '';
+}
+
+function createDetailedHttpError(statusCode, message, details = null) {
+  const error = createHttpError(statusCode, message);
+  if (details) {
+    error.details = sanitizeQrPayload(details);
+  }
+  return error;
+}
+
+function validateFreshLoginPayload({
+  agentId,
+  channelId,
+  authNamespace,
+  runtimeSessionId,
+  adapterSessionId,
+  previousAuthNamespace,
+  previousRuntimeSessionId,
+  previousAdapterSessionId,
+}) {
+  if (!agentId) {
+    throw createDetailedHttpError(400, 'agentId diperlukan untuk fresh login', { channelId: channelId || null });
+  }
+
+  if (!channelId) {
+    throw createDetailedHttpError(400, 'channelId diperlukan untuk fresh login', { agentId });
+  }
+
+  if (!authNamespace || !runtimeSessionId || !adapterSessionId) {
+    throw createDetailedHttpError(409, 'Fresh login harus memakai authNamespace, runtimeSessionId, dan adapterSessionId baru.', {
+      agentId,
+      channelId,
+      authNamespace: authNamespace || null,
+      runtimeSessionId: runtimeSessionId || null,
+      adapterSessionId: adapterSessionId || null,
+    });
+  }
+
+  if (
+    authNamespace === previousAuthNamespace
+    || runtimeSessionId === previousRuntimeSessionId
+    || adapterSessionId === previousAdapterSessionId
+  ) {
+    throw createDetailedHttpError(409, 'Fresh login masih memakai state lama.', {
+      agentId,
+      channelId,
+      authNamespace,
+      runtimeSessionId,
+      adapterSessionId,
+      previousAuthNamespace: previousAuthNamespace || null,
+      previousRuntimeSessionId: previousRuntimeSessionId || null,
+      previousAdapterSessionId: previousAdapterSessionId || null,
+    });
+  }
 }
 
 function resolveWhatsAppInstallRecord(config) {
@@ -231,15 +339,48 @@ function resolveWhatsAppAccount(config, accountId) {
   };
 }
 
-async function resolveWhatsAppAccountContext(accountId) {
-  const config = loadConfig();
-  const account = resolveWhatsAppAccount(config, accountId);
-  const runtimeApi = await loadWhatsAppRuntime(config);
-  return { runtimeApi, account };
+async function resolveWhatsAppAccountContext(accountId, options = {}) {
+  const expectedAuthDir = resolveFreshAuthDir(options.authNamespace);
+  const shouldRetry = options.forceFreshLogin === true || options.forceRefreshConfig === true;
+  const deadline = Date.now() + FRESH_LOGIN_CONFIG_SYNC_TIMEOUT_MS;
+  let lastError = null;
+
+  while (true) {
+    try {
+      if (options.forceRefreshConfig === true || options.forceFreshLogin === true) {
+        clearRuntimeConfigSnapshot();
+      }
+
+      const config = loadConfig();
+      const account = resolveWhatsAppAccount(config, accountId);
+      const runtimeApi = await loadWhatsAppRuntime(config);
+      const authMatches = !expectedAuthDir || account.authDir === expectedAuthDir;
+
+      if (authMatches) {
+        return { runtimeApi, account };
+      }
+
+      lastError = createDetailedHttpError(409, 'Fresh login runtime config belum sinkron.', {
+        accountId,
+        expectedAuthDir: expectedAuthDir || null,
+        observedAuthDir: account.authDir || null,
+        runtimeSessionId: options.runtimeSessionId || null,
+        adapterSessionId: options.adapterSessionId || null,
+      });
+    } catch (error) {
+      lastError = error;
+    }
+
+    if (!shouldRetry || Date.now() >= deadline) {
+      throw lastError;
+    }
+
+    await waitMs(FRESH_LOGIN_CONFIG_SYNC_POLL_MS);
+  }
 }
 
-async function buildStatus(accountId) {
-  const { runtimeApi, account } = await resolveWhatsAppAccountContext(accountId);
+async function buildStatus(accountId, options = {}) {
+  const { runtimeApi, account } = await resolveWhatsAppAccountContext(accountId, options);
   const linked = await runtimeApi.webAuthExists(account.authDir);
   const self = linked
     ? runtimeApi.readWebSelfId(account.authDir)
@@ -304,8 +445,46 @@ async function buildStatus(accountId) {
   };
 }
 
+async function recoverFreshLoginStatus(accountId, responsePayload, options = {}) {
+  let nextPayload = responsePayload;
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const hasArtifact = Boolean(nextPayload?.qrDataUrl || nextPayload?.pairingCode);
+    const errorText = String(nextPayload?.lastError || nextPayload?.message || '').trim();
+
+    if (hasArtifact || !/not found/i.test(errorText)) {
+      return nextPayload;
+    }
+
+    logBridge('fresh-login:status-retry-after-not-found', {
+      accountId,
+      attempt: attempt + 1,
+      errorText,
+    });
+
+    await waitMs(FRESH_LOGIN_CONFIG_SYNC_POLL_MS);
+    const status = await buildStatus(accountId, {
+      ...options,
+      forceFreshLogin: true,
+      forceRefreshConfig: true,
+    });
+
+    nextPayload = {
+      ...nextPayload,
+      ...status,
+      rawRuntimePayload: sanitizeQrPayload({
+        ...(status.rawRuntimePayload || {}),
+        ...(nextPayload.rawRuntimePayload || {}),
+      }),
+    };
+  }
+
+  return nextPayload;
+}
+
 async function handleStatus(req, res) {
   try {
+    const routePath = logRouteHit(req);
     if (req.method !== 'POST') {
       return sendJson(res, 405, { error: 'Method Not Allowed', message: 'Gunakan POST' });
     }
@@ -314,6 +493,7 @@ async function handleStatus(req, res) {
     const accountId = readRequiredAccountId(body);
     const status = await buildStatus(accountId);
     logBridge('status', {
+      routePath,
       accountId,
       summary: summarizeQrPayload(status),
       rawRuntimePayload: status.rawRuntimePayload || null,
@@ -329,35 +509,163 @@ async function handleStatus(req, res) {
 }
 
 async function handleStart(req, res) {
+  let accountId = null;
+  let agentId = null;
+  let channelId = null;
+  let runtimeSessionId = null;
+  let adapterSessionId = null;
+  let forceFreshLogin = false;
+
   try {
+    const routePath = logRouteHit(req);
     if (req.method !== 'POST') {
       return sendJson(res, 405, { error: 'Method Not Allowed', message: 'Gunakan POST' });
     }
 
     const body = await readJsonBody(req);
-    const accountId = readRequiredAccountId(body);
-    const { runtimeApi, account } = await resolveWhatsAppAccountContext(accountId);
+    accountId = readRequiredAccountId(body);
+    forceFreshLogin = body.forceFreshLogin === true;
+    channelId = readOptionalString(body, 'channelId') || accountId;
+    agentId = readOptionalString(body, 'agentId') || null;
+    const previousAuthDir = readOptionalString(body, 'previousAuthDir');
+    const previousAuthNamespace = readOptionalString(body, 'previousAuthNamespace');
+    const authNamespace = readOptionalString(body, 'authNamespace');
+    runtimeSessionId = readOptionalString(body, 'runtimeSessionId');
+    adapterSessionId = readOptionalString(body, 'adapterSessionId');
+    const previousRuntimeSessionId = readOptionalString(body, 'previousRuntimeSessionId');
+    const previousAdapterSessionId = readOptionalString(body, 'previousAdapterSessionId');
+
+    if (forceFreshLogin) {
+      console.log('[Fresh Login] Incoming payload', {
+        agentId,
+        channelId,
+        runtimeSessionId: runtimeSessionId || null,
+        adapterSessionId: adapterSessionId || null,
+        forceFreshLogin,
+      });
+      validateFreshLoginPayload({
+        agentId,
+        channelId,
+        authNamespace,
+        runtimeSessionId,
+        adapterSessionId,
+        previousAuthNamespace,
+        previousRuntimeSessionId,
+        previousAdapterSessionId,
+      });
+      console.log('[Fresh Login] Step 3: Remove old auth');
+      console.log('[Fresh Login] Step 5: Build new auth folder', {
+        channelId,
+        authNamespace,
+        authDir: resolveFreshAuthDir(authNamespace) || null,
+      });
+    }
+
+    const contextOptions = forceFreshLogin
+      ? {
+          forceFreshLogin: true,
+          forceRefreshConfig: true,
+          authNamespace,
+          runtimeSessionId,
+          adapterSessionId,
+        }
+      : {};
+    const { runtimeApi, account } = await resolveWhatsAppAccountContext(accountId, contextOptions);
+
+    if (forceFreshLogin) {
+      logBridge('Fresh login handler entered', {
+        routePath,
+        accountId,
+        channelId,
+        agentId,
+      });
+    }
+
+    if (forceFreshLogin) {
+      logBridge('fresh-login:requested', {
+        routePath,
+        accountId,
+        channelId,
+        agentId,
+        previousAuthNamespace: previousAuthNamespace || null,
+        previousAuthDir: previousAuthDir || null,
+        previousRuntimeSessionId: previousRuntimeSessionId || null,
+        previousAdapterSessionId: previousAdapterSessionId || null,
+        authNamespace: authNamespace || null,
+        runtimeSessionId: runtimeSessionId || null,
+        adapterSessionId: adapterSessionId || null,
+      });
+      logBridge('fresh-login:config-ready', {
+        routePath,
+        accountId,
+        authDir: account.authDir,
+        authNamespace: authNamespace || null,
+        runtimeSessionId: runtimeSessionId || null,
+        adapterSessionId: adapterSessionId || null,
+      });
+    }
+
     logBridge('start:request', {
       accountId,
-      force: body.force === true,
+      force: body.force === true || forceFreshLogin,
+      forceFreshLogin,
       timeoutMs: normalizeTimeoutMs(body.timeoutMs, 30000),
     });
 
-    if (body.force === true && typeof runtimeApi.logoutWeb === 'function') {
+    if (forceFreshLogin && previousAuthDir && typeof runtimeApi.logoutWeb === 'function') {
+      await runtimeApi.logoutWeb({
+        authDir: previousAuthDir,
+        isLegacyAuthDir: false,
+      }).catch(() => null);
+      logBridge('Existing auth removed', {
+        accountId,
+        previousAuthNamespace: previousAuthNamespace || null,
+        previousAuthDir,
+      });
+    }
+
+    if (forceFreshLogin) {
+      logBridge('Existing runtime removed', {
+        routePath,
+        accountId,
+        previousRuntimeSessionId: previousRuntimeSessionId || null,
+        previousAdapterSessionId: previousAdapterSessionId || null,
+      });
+    }
+
+    if ((body.force === true || forceFreshLogin) && typeof runtimeApi.logoutWeb === 'function') {
       await runtimeApi.logoutWeb({
         authDir: account.authDir,
         isLegacyAuthDir: account.isLegacyAuthDir === true,
       });
     }
 
+    if (forceFreshLogin) {
+      logBridge('New namespace generated', {
+        routePath,
+        accountId,
+        authNamespace: authNamespace || account.authDir,
+        runtimeSessionId: runtimeSessionId || null,
+        adapterSessionId: adapterSessionId || null,
+      });
+      console.log('[Fresh Login] Step 7: Start QR generation');
+      logBridge('QR generation started', {
+        routePath,
+        accountId,
+        authNamespace: authNamespace || account.authDir,
+        runtimeSessionId: runtimeSessionId || null,
+        adapterSessionId: adapterSessionId || null,
+      });
+    }
+
     const result = await runtimeApi.startWebLoginWithQr({
       accountId,
-      force: body.force === true,
+      force: body.force === true || forceFreshLogin,
       timeoutMs: normalizeTimeoutMs(body.timeoutMs, 30000),
     });
 
-    const status = await buildStatus(accountId);
-    const responsePayload = {
+    const status = await buildStatus(accountId, contextOptions);
+    let responsePayload = {
       ...status,
       ...result,
       rawRuntimePayload: sanitizeQrPayload({
@@ -366,25 +674,56 @@ async function handleStart(req, res) {
       }),
     };
 
+    if (forceFreshLogin) {
+      responsePayload = await recoverFreshLoginStatus(accountId, responsePayload, contextOptions);
+    }
+
     logBridge('start:response', {
+      routePath,
       accountId,
+      forceFreshLogin,
       summary: summarizeQrPayload(responsePayload),
       rawRuntimePayload: responsePayload.rawRuntimePayload,
       status: summarizeQrPayload(status),
     });
 
+    if (forceFreshLogin && (responsePayload?.qrDataUrl || responsePayload?.pairingCode)) {
+      logBridge('QR generated successfully', {
+        routePath,
+        accountId,
+        authNamespace: authNamespace || account.authDir,
+        summary: summarizeQrPayload(responsePayload),
+      });
+    }
+
+    if (forceFreshLogin) {
+      console.log('[Fresh Login] Step 8: Return QR payload');
+    }
+
     return sendJson(res, 200, responsePayload);
   } catch (error) {
+    if (forceFreshLogin) {
+      console.error('[Fresh Login] Failed', {
+        message: error?.message || String(error),
+        stack: error?.stack || null,
+        agentId,
+        channelId,
+        runtimeSessionId,
+        adapterSessionId,
+      });
+    }
     logBridge('start:error', { message: error?.message || String(error), statusCode: error?.statusCode || 500 });
     return sendJson(res, error?.statusCode || 500, {
       error: error?.statusCode ? 'Bad Request' : 'Internal Error',
       message: error?.message || 'Gagal memulai QR login WhatsApp',
+      details: error?.details || null,
     });
   }
 }
 
 async function handleWait(req, res) {
   try {
+    const routePath = logRouteHit(req);
     if (req.method !== 'POST') {
       return sendJson(res, 405, { error: 'Method Not Allowed', message: 'Gunakan POST' });
     }
@@ -393,6 +732,7 @@ async function handleWait(req, res) {
     const accountId = readRequiredAccountId(body);
     const { runtimeApi } = await resolveWhatsAppAccountContext(accountId);
     logBridge('wait:request', {
+      routePath,
       accountId,
       timeoutMs: normalizeTimeoutMs(body.timeoutMs, 120000),
     });
@@ -412,6 +752,7 @@ async function handleWait(req, res) {
     };
 
     logBridge('wait:response', {
+      routePath,
       accountId,
       summary: summarizeQrPayload(responsePayload),
       rawRuntimePayload: responsePayload.rawRuntimePayload,
@@ -438,8 +779,14 @@ export default definePluginEntry({
     properties: {},
   },
   register(api) {
-    api.registerHttpRoute({ path: ROUTES.status, auth: 'gateway', handler: handleStatus });
-    api.registerHttpRoute({ path: ROUTES.start, auth: 'gateway', handler: handleStart });
-    api.registerHttpRoute({ path: ROUTES.wait, auth: 'gateway', handler: handleWait });
+    for (const path of STATUS_ROUTE_ALIASES) {
+      api.registerHttpRoute({ path, auth: 'gateway', handler: handleStatus });
+    }
+    for (const path of START_ROUTE_ALIASES) {
+      api.registerHttpRoute({ path, auth: 'gateway', handler: handleStart });
+    }
+    for (const path of WAIT_ROUTE_ALIASES) {
+      api.registerHttpRoute({ path, auth: 'gateway', handler: handleWait });
+    }
   },
 });

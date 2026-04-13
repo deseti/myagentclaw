@@ -9,6 +9,7 @@
  */
 
 const ADAPTER_URL = process.env.OPENCLAW_ADAPTER_URL || process.env.OPENCLAW_BASE_URL || 'http://openclaw-adapter:4000';
+const ADAPTER_WHATSAPP_LINK_BASE = '/api/myagentclaw/whatsapp/link';
 
 function resolveAdapterBaseUrl(runtime = {}) {
   return runtime?.adapterUrl || ADAPTER_URL;
@@ -89,7 +90,7 @@ export async function ocSendChannelMessage(channelId, channelType, to, text, opt
 }
 
 export async function ocGetWhatsAppLinkStatus(channelId, runtime = {}) {
-  return adapterFetch('/channels/whatsapp/link/status', {
+  return adapterFetch(`${ADAPTER_WHATSAPP_LINK_BASE}/status`, {
     method: 'POST',
     body: JSON.stringify({ channelId }),
     timeoutMs: 10000,
@@ -97,11 +98,20 @@ export async function ocGetWhatsAppLinkStatus(channelId, runtime = {}) {
 }
 
 export async function ocStartWhatsAppLink(channelId, options = {}, runtime = {}) {
-  return adapterFetch('/channels/whatsapp/link/start', {
+  return adapterFetch(`${ADAPTER_WHATSAPP_LINK_BASE}/start`, {
     method: 'POST',
     body: JSON.stringify({
       channelId,
+      agentId: options.agentId,
       force: options.force === true,
+      forceFreshLogin: options.forceFreshLogin === true,
+      authNamespace: options.authNamespace,
+      runtimeSessionId: options.runtimeSessionId,
+      adapterSessionId: options.adapterSessionId,
+      previousAuthNamespace: options.previousAuthNamespace,
+      previousRuntimeSessionId: options.previousRuntimeSessionId,
+      previousAdapterSessionId: options.previousAdapterSessionId,
+      previousAuthDir: options.previousAuthDir,
       timeoutMs: options.timeoutMs,
     }),
     timeoutMs: Math.max(10000, Number(options.timeoutMs || 30000) + 10000),
@@ -110,7 +120,7 @@ export async function ocStartWhatsAppLink(channelId, options = {}, runtime = {})
 
 export async function ocWaitWhatsAppLink(channelId, options = {}, runtime = {}) {
   const requestedTimeoutMs = Math.max(1000, Number(options.timeoutMs || 120000));
-  return adapterFetch('/channels/whatsapp/link/wait', {
+  return adapterFetch(`${ADAPTER_WHATSAPP_LINK_BASE}/wait`, {
     method: 'POST',
     body: JSON.stringify({
       channelId,

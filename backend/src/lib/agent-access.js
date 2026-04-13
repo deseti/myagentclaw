@@ -10,9 +10,9 @@ export const AGENT_CUSTOMER_ACCESS_STATUSES = Object.freeze({
   ACTIVE: 'ACTIVE',
 });
 
-export const DEFAULT_PENDING_REPLY = 'Pesan Anda sudah diterima. Kirim pairing code untuk melanjutkan akses.';
-export const INVALID_APPROVAL_CODE_REPLY = 'Pairing code tidak valid. Periksa kembali kode Anda lalu kirim ulang.';
-export const APPROVAL_SUCCESS_REPLY = 'Akses berhasil diaktifkan. Anda sekarang bisa melanjutkan percakapan.';
+export const DEFAULT_PENDING_REPLY = 'Anda masih memerlukan approval sebelum bisa menggunakan agent ini.\n\nSilakan kirim approval code yang benar.';
+export const INVALID_APPROVAL_CODE_REPLY = DEFAULT_PENDING_REPLY;
+export const APPROVAL_SUCCESS_REPLY = 'Approval berhasil. Anda sekarang sudah bisa menggunakan agent ini.';
 
 const APPROVAL_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const APPROVAL_CODE_LENGTH = 8;
@@ -44,6 +44,37 @@ export function normalizeApprovalCodeInput(value) {
     .trim()
     .toUpperCase()
     .replace(/[^A-Z0-9]/g, '');
+}
+
+export function validateApprovalCode(agent, value) {
+  const expected = normalizeApprovalCodeInput(agent?.approvalCode);
+  const candidate = normalizeApprovalCodeInput(value);
+
+  return Boolean(expected && candidate && candidate === expected);
+}
+
+export function sendPendingReply({ agent, hasExistingPending = false, invalidCode = false } = {}) {
+  const approvalCode = normalizeApprovalCodeInput(agent?.approvalCode);
+
+  if (!approvalCode) {
+    return [
+      'Agent ini memerlukan approval sebelum bisa digunakan.',
+      '',
+      'Silakan tunggu approval dari owner/admin sebelum chat normal.',
+    ].join('\n');
+  }
+
+  if (hasExistingPending || invalidCode) {
+    return DEFAULT_PENDING_REPLY;
+  }
+
+  return [
+    'Agent ini memerlukan approval sebelum bisa digunakan.',
+    '',
+    'Silakan minta approval code ke owner/admin, lalu kirim kode tersebut di chat ini.',
+    '',
+    'Setelah diapprove, Anda bisa chat normal.',
+  ].join('\n');
 }
 
 export function looksLikeApprovalCode(value, codeLength = APPROVAL_CODE_LENGTH) {

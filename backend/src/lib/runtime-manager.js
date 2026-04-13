@@ -407,33 +407,6 @@ export async function ensureWorkspaceRuntime(workspace, options = {}) {
   });
 
   await ensureContainerRunning({
-    name: names.openclawContainerName,
-    image: openclawImage.reference,
-    imageId: openclawImage.imageId,
-    networkName,
-    volumeName: names.volumeName,
-    labels: {
-      'myagentclaw.runtime.mode': 'dedicated',
-      'myagentclaw.owner.id': workspace.ownerId,
-      'myagentclaw.tier': workspace.subTier,
-      'myagentclaw.service': 'openclaw',
-    },
-    env: [
-      envLiteral('HOME', '/home/node'),
-      envValue('NODE_ENV', 'production'),
-      envValue('OPENCLAW_GATEWAY_PORT', '18789'),
-      envLiteral('OPENCLAW_GATEWAY_TOKEN', DEDICATED_GATEWAY_TOKEN),
-      envValue('OPENAI_API_KEY'),
-      envValue('ANTHROPIC_API_KEY'),
-      envValue('INTERNAL_SECRET_KEY'),
-      envValue('BACKEND_INTERNAL_URL', 'http://backend:3001'),
-    ],
-    cmd: ['node', 'dist/index.js', 'gateway', '--bind', 'lan', '--port', '18789', '--allow-unconfigured'],
-    extraBinds: [bootstrapBind],
-    forceRecreate: forceRecreateOpenclaw,
-  });
-
-  await ensureContainerRunning({
     name: names.adapterContainerName,
     image: adapterImage.reference,
     imageId: adapterImage.imageId,
@@ -466,10 +439,38 @@ export async function ensureWorkspaceRuntime(workspace, options = {}) {
     forceRecreate: forceRecreateAdapter,
   });
 
-  const openclawUrl = getDedicatedOpenclawUrl(workspace.ownerId);
   const adapterUrl = getDedicatedAdapterUrl(workspace.ownerId);
-  await waitForOpenclawHealth(openclawUrl);
   await waitForAdapterHealth(adapterUrl);
+
+  await ensureContainerRunning({
+    name: names.openclawContainerName,
+    image: openclawImage.reference,
+    imageId: openclawImage.imageId,
+    networkName,
+    volumeName: names.volumeName,
+    labels: {
+      'myagentclaw.runtime.mode': 'dedicated',
+      'myagentclaw.owner.id': workspace.ownerId,
+      'myagentclaw.tier': workspace.subTier,
+      'myagentclaw.service': 'openclaw',
+    },
+    env: [
+      envLiteral('HOME', '/home/node'),
+      envValue('NODE_ENV', 'production'),
+      envValue('OPENCLAW_GATEWAY_PORT', '18789'),
+      envLiteral('OPENCLAW_GATEWAY_TOKEN', DEDICATED_GATEWAY_TOKEN),
+      envValue('OPENAI_API_KEY'),
+      envValue('ANTHROPIC_API_KEY'),
+      envValue('INTERNAL_SECRET_KEY'),
+      envValue('BACKEND_INTERNAL_URL', 'http://backend:3001'),
+    ],
+    cmd: ['node', 'dist/index.js', 'gateway', '--bind', 'lan', '--port', '18789', '--allow-unconfigured'],
+    extraBinds: [bootstrapBind],
+    forceRecreate: forceRecreateOpenclaw,
+  });
+
+  const openclawUrl = getDedicatedOpenclawUrl(workspace.ownerId);
+  await waitForOpenclawHealth(openclawUrl);
 
   return {
     mode: 'DEDICATED',
