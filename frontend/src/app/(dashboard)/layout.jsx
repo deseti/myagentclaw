@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import {
-  LayoutDashboard, Bot, MessageSquare, BookOpen, Inbox, Users, CreditCard, LogOut, Wrench, Menu, X, LineChart, Wallet,
+  LayoutDashboard, Bot, MessageSquare, BookOpen, Inbox, Users, CreditCard, LogOut, Wrench, Menu, X, LineChart, Wallet, CalendarDays,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { logout, isAuthenticated } from '@/lib/auth';
@@ -21,6 +21,7 @@ import { useDashboardStore } from '@/store/workspace.store';
 
 const POLYMARKET_MINIMUM_TIER = getInternalSkillDefinition(INTERNAL_SKILL_KEYS.POLYMARKET_READ_ONLY)?.minimumTier || 'GROWTH';
 const PAYMENT_REMINDER_MINIMUM_TIER = getInternalSkillDefinition(INTERNAL_SKILL_KEYS.PAYMENT_REMINDER)?.minimumTier || 'STARTER';
+const APPOINTMENT_SCHEDULER_MINIMUM_TIER = getInternalSkillDefinition(INTERNAL_SKILL_KEYS.APPOINTMENT_SCHEDULER)?.minimumTier || 'STARTER';
 
 const NAV_ITEMS = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -29,6 +30,7 @@ const NAV_ITEMS = [
   { href: '/dashboard/skills', label: 'Skills', icon: Wrench },
   { href: '/dashboard/polymarket', label: 'Polymarket', icon: LineChart },
   { href: '/dashboard/payment-reminder', label: 'Payment Reminder', icon: Wallet },
+  { href: '/dashboard/appointment-scheduler', label: 'Appointment Scheduler', icon: CalendarDays },
   { href: '/dashboard/knowledge', label: 'Knowledge Base', icon: BookOpen },
   { href: '/dashboard/conversations', label: 'Percakapan', icon: Inbox, badge: 'needsAdmin' },
   { href: '/dashboard/customers', label: 'Customer', icon: Users },
@@ -107,10 +109,16 @@ export default function DashboardLayout({ children }) {
   const [workspaceTier, setWorkspaceTier] = useState('FREE');
   const [hasActivePolymarketSkill, setHasActivePolymarketSkill] = useState(false);
   const [hasActivePaymentReminderSkill, setHasActivePaymentReminderSkill] = useState(false);
+  const [hasActiveAppointmentSchedulerSkill, setHasActiveAppointmentSchedulerSkill] = useState(false);
 
   const handleLogout = () => logout();
   const navItems = NAV_ITEMS.filter((item) => {
-    if (workspaceTier === 'FREE' && (item.href === '/dashboard/skills' || item.href === '/dashboard/polymarket' || item.href === '/dashboard/payment-reminder')) {
+    if (workspaceTier === 'FREE' && (
+      item.href === '/dashboard/skills'
+      || item.href === '/dashboard/polymarket'
+      || item.href === '/dashboard/payment-reminder'
+      || item.href === '/dashboard/appointment-scheduler'
+    )) {
       return false;
     }
 
@@ -119,6 +127,10 @@ export default function DashboardLayout({ children }) {
     }
 
     if (item.href === '/dashboard/payment-reminder' && !hasActivePaymentReminderSkill) {
+      return false;
+    }
+
+    if (item.href === '/dashboard/appointment-scheduler' && !hasActiveAppointmentSchedulerSkill) {
       return false;
     }
 
@@ -165,12 +177,17 @@ export default function DashboardLayout({ children }) {
           const nextTier = data.workspace?.subTier || 'FREE';
           const polymarketEligible = canAccessInternalSkill(nextTier, POLYMARKET_MINIMUM_TIER);
           const paymentReminderEligible = canAccessInternalSkill(nextTier, PAYMENT_REMINDER_MINIMUM_TIER);
+          const appointmentSchedulerEligible = canAccessInternalSkill(nextTier, APPOINTMENT_SCHEDULER_MINIMUM_TIER);
           setWorkspaceTier(nextTier);
 
           if (nextTier === 'FREE') {
             setHasActivePolymarketSkill(false);
             setHasActivePaymentReminderSkill(false);
+            setHasActiveAppointmentSchedulerSkill(false);
             if (pathname.startsWith('/dashboard/payment-reminder')) {
+              router.replace('/dashboard/skills');
+            }
+            if (pathname.startsWith('/dashboard/appointment-scheduler')) {
               router.replace('/dashboard/skills');
             }
             return;
@@ -190,6 +207,13 @@ export default function DashboardLayout({ children }) {
             }
           }
 
+          if (!appointmentSchedulerEligible) {
+            setHasActiveAppointmentSchedulerSkill(false);
+            if (pathname.startsWith('/dashboard/appointment-scheduler')) {
+              router.replace('/dashboard/skills');
+            }
+          }
+
           try {
             const { data: skillsData } = await api.get('/skills/installed');
             if (cancelled) return;
@@ -197,10 +221,13 @@ export default function DashboardLayout({ children }) {
             const installedSkills = Array.isArray(skillsData.skills) ? skillsData.skills : [];
             const polymarketSkill = getInstalledInternalSkill(installedSkills, INTERNAL_SKILL_KEYS.POLYMARKET_READ_ONLY);
             const paymentReminderSkill = getInstalledInternalSkill(installedSkills, INTERNAL_SKILL_KEYS.PAYMENT_REMINDER);
+            const appointmentSchedulerSkill = getInstalledInternalSkill(installedSkills, INTERNAL_SKILL_KEYS.APPOINTMENT_SCHEDULER);
             const polymarketActive = isInternalSkillActive(polymarketSkill);
             const paymentReminderActive = paymentReminderEligible && isInternalSkillActive(paymentReminderSkill);
+            const appointmentSchedulerActive = appointmentSchedulerEligible && isInternalSkillActive(appointmentSchedulerSkill);
             setHasActivePolymarketSkill(polymarketActive);
             setHasActivePaymentReminderSkill(paymentReminderActive);
+            setHasActiveAppointmentSchedulerSkill(appointmentSchedulerActive);
 
             if (!polymarketActive && pathname.startsWith('/dashboard/polymarket')) {
               router.replace('/dashboard/skills');
@@ -209,14 +236,22 @@ export default function DashboardLayout({ children }) {
             if (!paymentReminderActive && pathname.startsWith('/dashboard/payment-reminder')) {
               router.replace('/dashboard/skills');
             }
+
+            if (!appointmentSchedulerActive && pathname.startsWith('/dashboard/appointment-scheduler')) {
+              router.replace('/dashboard/skills');
+            }
           } catch {
             if (!cancelled) {
               setHasActivePolymarketSkill(false);
               setHasActivePaymentReminderSkill(false);
+              setHasActiveAppointmentSchedulerSkill(false);
               if (pathname.startsWith('/dashboard/polymarket')) {
                 router.replace('/dashboard/skills');
               }
               if (pathname.startsWith('/dashboard/payment-reminder')) {
+                router.replace('/dashboard/skills');
+              }
+              if (pathname.startsWith('/dashboard/appointment-scheduler')) {
                 router.replace('/dashboard/skills');
               }
             }
@@ -228,6 +263,7 @@ export default function DashboardLayout({ children }) {
           setWorkspaceTier('FREE');
           setHasActivePolymarketSkill(false);
           setHasActivePaymentReminderSkill(false);
+          setHasActiveAppointmentSchedulerSkill(false);
         }
       });
 

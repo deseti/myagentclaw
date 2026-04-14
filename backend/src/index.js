@@ -70,6 +70,7 @@ await fastify.register(async (app) => {
   const { default: webhookRoute } = await import('./routes/webhook.route.js');
   const { default: conversationRoute } = await import('./routes/conversation.route.js');
   const { default: dashboardRoute } = await import('./routes/dashboard.route.js');
+  const { default: appointmentRoute } = await import('./routes/appointments.route.js');
   const { default: paymentReminderRoute } = await import('./routes/payment-reminders.route.js');
   const { default: polymarketRoute } = await import('./routes/polymarket.route.js');
   const { default: polymarketAutopilotRoute } = await import('./routes/polymarket-autopilot.route.js');
@@ -83,6 +84,7 @@ await fastify.register(async (app) => {
   app.register(channelRoute, { prefix: '/channels' });
   app.register(conversationRoute, { prefix: '/conversations' });
   app.register(dashboardRoute, { prefix: '/dashboard' });
+  app.register(appointmentRoute, { prefix: '/appointments' });
   app.register(paymentReminderRoute, { prefix: '/payment-reminders' });
   app.register(polymarketRoute, { prefix: '/polymarket' });
   app.register(polymarketAutopilotRoute, { prefix: '/polymarket/autopilot' });
@@ -244,6 +246,7 @@ try {
   // Start BullMQ workers (fire-and-forget imports)
   import('./queues/followup.worker.js').catch((err) => fastify.log.warn(err, 'followup-worker init failed'));
   import('./queues/reminder.worker.js').catch((err) => fastify.log.warn(err, 'reminder-worker init failed'));
+  import('./queues/appointment-reminder.worker.js').catch((err) => fastify.log.warn(err, 'appointment-reminder-worker init failed'));
   import('./queues/polymarket-autopilot.worker.js').catch((err) => fastify.log.warn(err, 'polymarket-autopilot-worker init failed'));
 } catch (err) {
   fastify.log.error(err, 'Failed to start server');

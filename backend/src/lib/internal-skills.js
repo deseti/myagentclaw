@@ -18,7 +18,12 @@ export const INTERNAL_SKILL_DEFINITIONS = [
     minimumTier: 'STARTER',
     isComingSoon: false,
   },
-  { key: INTERNAL_SKILL_KEYS.APPOINTMENT_SCHEDULER, minimumTier: 'STARTER', isComingSoon: true },
+  {
+    key: INTERNAL_SKILL_KEYS.APPOINTMENT_SCHEDULER,
+    displayName: 'Appointment Scheduler',
+    minimumTier: 'STARTER',
+    isComingSoon: false,
+  },
   { key: INTERNAL_SKILL_KEYS.CRM_PIPELINE, minimumTier: 'STARTER', isComingSoon: true },
   { key: INTERNAL_SKILL_KEYS.BROADCAST_CAMPAIGN, minimumTier: 'STARTER', isComingSoon: true },
   { key: INTERNAL_SKILL_KEYS.ANALYTICS_DASHBOARD, minimumTier: 'GROWTH', isComingSoon: true },

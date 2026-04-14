@@ -14,6 +14,7 @@ import {
 } from '../lib/openclaw-client.js';
 import { ensureWorkspaceRuntime } from '../lib/runtime-manager.js';
 import { syncAgentToGateway } from '../lib/agent-provisioner.js';
+import { APPOINTMENT_SCHEDULER_SKILL_KEY } from '../lib/appointment-scheduler.js';
 import {
   formatInternalSkillTierLabel,
   getInternalSkillDefinition,
@@ -200,6 +201,7 @@ async function clearSkillAssignments(ownerId, installedSkill) {
     installedSkill?.skillKey,
     installedSkill?.slug,
   ].filter(Boolean))];
+  const removesAppointmentScheduler = candidateKeys.includes(APPOINTMENT_SCHEDULER_SKILL_KEY);
 
   if (candidateKeys.length === 0) {
     return [];
@@ -228,10 +230,21 @@ async function clearSkillAssignments(ownerId, installedSkill) {
       where: { id: agent.id },
       data: {
         openclawSkill: remainingSkills[0] || null,
-        configJson: mergeAgentConfig(agent.configJson, { assignedSkills: remainingSkills }),
+        configJson: mergeAgentConfig(agent.configJson, {
+          assignedSkills: remainingSkills,
+          ...(removesAppointmentScheduler ? { appointmentSchedulerConfig: {} } : {}),
+        }),
       },
     });
   }));
+
+  if (removesAppointmentScheduler) {
+    await prisma.appointmentAvailability.deleteMany({
+      where: {
+        agentId: { in: matchedAgents.map((agent) => agent.id) },
+      },
+    });
+  }
 
   await Promise.all(matchedAgents.map((agent) => syncAgentToGateway(agent.id)));
 

@@ -20,13 +20,19 @@ import {
   workspaceMeetsMinimumTier,
 } from '../lib/internal-skills.js';
 import {
+  getAppointmentSchedulerConfig,
+  APPOINTMENT_SCHEDULER_SKILL_KEY,
+} from '../lib/appointment-scheduler.js';
+import {
   AI_PROVIDER_DB_VALUE,
   getAiProviderConfig,
 } from '../lib/ai-provider-config.js';
 import { matchesSkillKey } from '../lib/skill-activation.js';
+import { syncAgentAppointmentAvailability } from '../services/appointment.service.js';
 
 const DEFAULT_AI_PROVIDER = AI_PROVIDER_DB_VALUE;
 const DEFAULT_AI_PROVIDER_MODEL = getAiProviderConfig().model;
+const hourPattern = /^(\d{1,2})(?::(\d{2}))?$/;
 
 // Limit jumlah agent per tier
 const AGENT_LIMIT = {
@@ -113,6 +119,18 @@ const createAgentSchema = z.object({
   systemPrompt: z.string().max(12000).optional(),
   openclawSkill: z.string().max(100).optional(),
   assignedSkills: z.array(z.string().min(1).max(100)).max(20).optional(),
+  appointmentSchedulerConfig: z.object({
+    enableBooking: z.boolean().optional(),
+    enableReschedule: z.boolean().optional(),
+    enableCancellation: z.boolean().optional(),
+    enableReminder: z.boolean().optional(),
+    enableAutoSuggestSlot: z.boolean().optional(),
+    defaultMeetingDuration: z.coerce.number().int().min(15).max(480).optional(),
+    workingHoursStart: z.string().regex(hourPattern).optional(),
+    workingHoursEnd: z.string().regex(hourPattern).optional(),
+    workingDays: z.array(z.coerce.number().int().min(0).max(6)).max(7).optional(),
+    timezone: z.string().min(1).max(120).optional(),
+  }).optional(),
   sharedWorkspaceAccess: z.enum(['none', 'ro', 'rw']).optional(),
   accessMode: z.enum(['OPEN_ACCESS', 'APPROVAL_REQUIRED']).optional(),
   workspaceId: z.string().min(1),
@@ -127,6 +145,18 @@ const updateAgentSchema = z.object({
   systemPrompt: z.string().max(12000).optional(),
   openclawSkill: z.string().max(100).optional(),
   assignedSkills: z.array(z.string().min(1).max(100)).max(20).optional(),
+  appointmentSchedulerConfig: z.object({
+    enableBooking: z.boolean().optional(),
+    enableReschedule: z.boolean().optional(),
+    enableCancellation: z.boolean().optional(),
+    enableReminder: z.boolean().optional(),
+    enableAutoSuggestSlot: z.boolean().optional(),
+    defaultMeetingDuration: z.coerce.number().int().min(15).max(480).optional(),
+    workingHoursStart: z.string().regex(hourPattern).optional(),
+    workingHoursEnd: z.string().regex(hourPattern).optional(),
+    workingDays: z.array(z.coerce.number().int().min(0).max(6)).max(7).optional(),
+    timezone: z.string().min(1).max(120).optional(),
+  }).optional(),
   sharedWorkspaceAccess: z.enum(['none', 'ro', 'rw']).optional(),
   accessMode: z.enum(['OPEN_ACCESS', 'APPROVAL_REQUIRED']).optional(),
 });
@@ -137,6 +167,7 @@ function buildAgentUpdateData(existing, payload) {
     systemPrompt,
     openclawSkill,
     assignedSkills,
+    appointmentSchedulerConfig,
     sharedWorkspaceAccess,
     accessMode,
     ...rest
@@ -146,6 +177,7 @@ function buildAgentUpdateData(existing, payload) {
     'systemPrompt',
     'openclawSkill',
     'assignedSkills',
+    'appointmentSchedulerConfig',
     'sharedWorkspaceAccess',
   ].some((key) => Object.prototype.hasOwnProperty.call(payload, key));
   const nextAccessMode = Object.prototype.hasOwnProperty.call(payload, 'accessMode')
@@ -173,6 +205,33 @@ function buildAgentUpdateData(existing, payload) {
       ? { configJson: mergeAgentConfig(existing.configJson, { ...payload, sharedWorkspaceAccess }) }
       : {}),
   };
+}
+
+async function syncAppointmentSchedulerConfigForAgent({
+  workspaceId,
+  agentId,
+  assignedSkills,
+  appointmentSchedulerConfig,
+  configSource,
+}) {
+  if (!assignedSkills.includes(APPOINTMENT_SCHEDULER_SKILL_KEY)) {
+    await syncAgentAppointmentAvailability({
+      workspaceId,
+      agentId,
+      config: null,
+    });
+    return;
+  }
+
+  const normalizedConfig = appointmentSchedulerConfig !== undefined
+    ? getAppointmentSchedulerConfig({ appointmentSchedulerConfig })
+    : getAppointmentSchedulerConfig(configSource || {});
+
+  await syncAgentAppointmentAvailability({
+    workspaceId,
+    agentId,
+    config: normalizedConfig,
+  });
 }
 
 export default async function agentRoute(fastify) {
@@ -225,6 +284,9 @@ export default async function agentRoute(fastify) {
       include: {
         workspace: { select: { id: true, name: true } },
         channels: { orderBy: { createdAt: 'desc' } },
+        appointmentAvailabilities: {
+          orderBy: [{ dayOfWeek: 'asc' }, { startHour: 'asc' }],
+        },
         _count: { select: { conversations: true } },
       },
     });
@@ -254,6 +316,7 @@ export default async function agentRoute(fastify) {
       systemPrompt,
       openclawSkill,
       assignedSkills,
+      appointmentSchedulerConfig,
       sharedWorkspaceAccess,
       accessMode,
       workspaceId,
@@ -318,10 +381,19 @@ export default async function agentRoute(fastify) {
           role,
           systemPrompt,
           assignedSkills: normalizedSkills,
+          appointmentSchedulerConfig,
           sharedWorkspaceAccess: normalizedSharedWorkspaceAccess,
         }) || undefined,
         status: 'INACTIVE',
       },
+    });
+
+    await syncAppointmentSchedulerConfigForAgent({
+      workspaceId,
+      agentId: agent.id,
+      assignedSkills: normalizedSkills,
+      appointmentSchedulerConfig,
+      configSource: agent,
     });
 
     // Provision ke openclaw gateway (fire and forget — jangan blok response)
@@ -353,71 +425,8 @@ export default async function agentRoute(fastify) {
             subTier: true,
           },
         },
-      },
-    });
-    if (!existing) {
-      return reply.code(404).send({ error: 'Not Found', message: 'Agent tidak ditemukan' });
-    }
-
-    if (requestedSkills(parsed.data).length > 0 && !workspaceCanUseSkills(existing.workspace)) {
-      return reply.code(403).send({
-        error: 'Forbidden',
-        message: 'Paket FREE belum mendukung fitur skill agent.',
-      });
-    }
-
-    if (!await assertRequestedSkillsReady({
-      ownerId,
-      workspace: existing.workspace,
-      skillKeys: requestedSkills(parsed.data),
-      reply,
-    })) {
-      return;
-    }
-
-    if (
-      Object.prototype.hasOwnProperty.call(parsed.data, 'sharedWorkspaceAccess')
-      && normalizeSharedWorkspaceAccess(parsed.data.sharedWorkspaceAccess) !== 'none'
-      && !workspaceCanUseSharedWorkspace(existing.workspace)
-    ) {
-      return reply.code(403).send({
-        error: 'Forbidden',
-        message: 'Paket FREE belum mendukung shared workspace antar agent.',
-      });
-    }
-
-    const agent = await prisma.agent.update({
-      where: { id },
-      data: buildAgentUpdateData(existing, parsed.data),
-    });
-
-    syncAgentToGateway(id).catch((err) => {
-      fastify.log.warn({ agentId: id, err: err.message }, 'Failed to sync updated agent to openclaw');
-    });
-
-    return reply.send({ message: 'Agent berhasil diupdate', agent });
-  });
-
-  // PUT /api/agents/:id — alias untuk PATCH (frontend compat)
-  fastify.put('/:id', async (request, reply) => {
-    const { ownerId } = request.user;
-    const { id } = request.params;
-
-    const parsed = updateAgentSchema.safeParse(request.body);
-    if (!parsed.success) {
-      return reply.code(400).send({ error: 'Validation error', details: parsed.error.flatten().fieldErrors });
-    }
-
-    const existing = await prisma.agent.findFirst({
-      where: { id, workspace: { ownerId } },
-      include: {
-        workspace: {
-          select: {
-            id: true,
-            ownerId: true,
-            name: true,
-            subTier: true,
-          },
+        appointmentAvailabilities: {
+          orderBy: [{ dayOfWeek: 'asc' }, { startHour: 'asc' }],
         },
       },
     });
@@ -455,6 +464,103 @@ export default async function agentRoute(fastify) {
     const agent = await prisma.agent.update({
       where: { id },
       data: buildAgentUpdateData(existing, parsed.data),
+    });
+
+    await syncAppointmentSchedulerConfigForAgent({
+      workspaceId: existing.workspace.id,
+      agentId: id,
+      assignedSkills: normalizeAssignedSkills(
+        Object.prototype.hasOwnProperty.call(parsed.data, 'assignedSkills')
+          ? parsed.data.assignedSkills
+          : agent.configJson?.assignedSkills || agent.openclawSkill,
+      ),
+      appointmentSchedulerConfig: Object.prototype.hasOwnProperty.call(parsed.data, 'appointmentSchedulerConfig')
+        ? parsed.data.appointmentSchedulerConfig
+        : undefined,
+      configSource: agent,
+    });
+
+    syncAgentToGateway(id).catch((err) => {
+      fastify.log.warn({ agentId: id, err: err.message }, 'Failed to sync updated agent to openclaw');
+    });
+
+    return reply.send({ message: 'Agent berhasil diupdate', agent });
+  });
+
+  // PUT /api/agents/:id — alias untuk PATCH (frontend compat)
+  fastify.put('/:id', async (request, reply) => {
+    const { ownerId } = request.user;
+    const { id } = request.params;
+
+    const parsed = updateAgentSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Validation error', details: parsed.error.flatten().fieldErrors });
+    }
+
+    const existing = await prisma.agent.findFirst({
+      where: { id, workspace: { ownerId } },
+      include: {
+        workspace: {
+          select: {
+            id: true,
+            ownerId: true,
+            name: true,
+            subTier: true,
+          },
+        },
+        appointmentAvailabilities: {
+          orderBy: [{ dayOfWeek: 'asc' }, { startHour: 'asc' }],
+        },
+      },
+    });
+    if (!existing) {
+      return reply.code(404).send({ error: 'Not Found', message: 'Agent tidak ditemukan' });
+    }
+
+    if (requestedSkills(parsed.data).length > 0 && !workspaceCanUseSkills(existing.workspace)) {
+      return reply.code(403).send({
+        error: 'Forbidden',
+        message: 'Paket FREE belum mendukung fitur skill agent.',
+      });
+    }
+
+    if (!await assertRequestedSkillsReady({
+      ownerId,
+      workspace: existing.workspace,
+      skillKeys: requestedSkills(parsed.data),
+      reply,
+    })) {
+      return;
+    }
+
+    if (
+      Object.prototype.hasOwnProperty.call(parsed.data, 'sharedWorkspaceAccess')
+      && normalizeSharedWorkspaceAccess(parsed.data.sharedWorkspaceAccess) !== 'none'
+      && !workspaceCanUseSharedWorkspace(existing.workspace)
+    ) {
+      return reply.code(403).send({
+        error: 'Forbidden',
+        message: 'Paket FREE belum mendukung shared workspace antar agent.',
+      });
+    }
+
+    const agent = await prisma.agent.update({
+      where: { id },
+      data: buildAgentUpdateData(existing, parsed.data),
+    });
+
+    await syncAppointmentSchedulerConfigForAgent({
+      workspaceId: existing.workspace.id,
+      agentId: id,
+      assignedSkills: normalizeAssignedSkills(
+        Object.prototype.hasOwnProperty.call(parsed.data, 'assignedSkills')
+          ? parsed.data.assignedSkills
+          : agent.configJson?.assignedSkills || agent.openclawSkill,
+      ),
+      appointmentSchedulerConfig: Object.prototype.hasOwnProperty.call(parsed.data, 'appointmentSchedulerConfig')
+        ? parsed.data.appointmentSchedulerConfig
+        : undefined,
+      configSource: agent,
     });
 
     syncAgentToGateway(id).catch((err) => {

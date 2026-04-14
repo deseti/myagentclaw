@@ -45,6 +45,26 @@ export async function workspaceHasAssignedSkill(workspaceId, requiredSkillKey) {
   return agents.some((agent) => agentHasAssignedSkill(agent, requiredSkillKey));
 }
 
+export async function listAgentsUsingSkill(workspaceId, requiredSkillKey) {
+  if (!workspaceId) {
+    return [];
+  }
+
+  const agents = await prisma.agent.findMany({
+    where: { workspaceId },
+    select: {
+      id: true,
+      name: true,
+      status: true,
+      openclawSkill: true,
+      configJson: true,
+    },
+    orderBy: { name: 'asc' },
+  });
+
+  return agents.filter((agent) => agentHasAssignedSkill(agent, requiredSkillKey));
+}
+
 export async function listWorkspaceIdsWithAssignedSkill(workspaceIds, requiredSkillKey) {
   const uniqueWorkspaceIds = [...new Set((workspaceIds || []).filter(Boolean))];
   if (uniqueWorkspaceIds.length === 0) {

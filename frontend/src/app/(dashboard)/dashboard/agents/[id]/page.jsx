@@ -17,6 +17,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
 import api from '@/lib/api';
 import { cn } from '@/lib/utils';
+import { INTERNAL_SKILL_KEYS } from '@/lib/internalSkills';
 import {
   MAIN_ROLE_PRESETS_MAP,
   TONE_PRESETS,
@@ -62,6 +63,31 @@ const ACCESS_MODE_OPTIONS = [
   },
 ];
 
+const APPOINTMENT_SCHEDULER_DEFAULT_CONFIG = {
+  enableBooking: true,
+  enableReschedule: true,
+  enableCancellation: true,
+  enableReminder: true,
+  enableAutoSuggestSlot: true,
+  defaultMeetingDuration: 60,
+  workingHoursStart: '09:00',
+  workingHoursEnd: '17:00',
+  workingDays: [1, 2, 3, 4, 5],
+  timezone: 'Asia/Jakarta',
+};
+
+const WEEKDAY_OPTIONS = [
+  { value: 1, label: 'Mon' },
+  { value: 2, label: 'Tue' },
+  { value: 3, label: 'Wed' },
+  { value: 4, label: 'Thu' },
+  { value: 5, label: 'Fri' },
+  { value: 6, label: 'Sat' },
+  { value: 0, label: 'Sun' },
+];
+
+const hourPattern = /^(\d{1,2})(?::(\d{2}))?$/;
+
 const agentSchema = z.object({
   name: z.string().min(2, 'Nama minimal 2 karakter'),
   role: z.string().min(2, 'Peran minimal 2 karakter').max(100, 'Peran maksimal 100 karakter'),
@@ -69,6 +95,18 @@ const agentSchema = z.object({
   persona: z.string().min(10, 'Persona minimal 10 karakter'),
   goal: z.string().min(10, 'Tujuan minimal 10 karakter'),
   assignedSkills: z.array(z.string()).optional(),
+  appointmentSchedulerConfig: z.object({
+    enableBooking: z.boolean().optional(),
+    enableReschedule: z.boolean().optional(),
+    enableCancellation: z.boolean().optional(),
+    enableReminder: z.boolean().optional(),
+    enableAutoSuggestSlot: z.boolean().optional(),
+    defaultMeetingDuration: z.coerce.number().int().min(15).max(480).optional(),
+    workingHoursStart: z.string().regex(hourPattern, 'Jam mulai tidak valid').optional(),
+    workingHoursEnd: z.string().regex(hourPattern, 'Jam selesai tidak valid').optional(),
+    workingDays: z.array(z.number().int().min(0).max(6)).max(7).optional(),
+    timezone: z.string().min(1).max(120).optional(),
+  }).optional(),
   systemPrompt: z.string().max(12000, 'System prompt maksimal 12000 karakter').optional(),
   sharedWorkspaceAccess: z.enum(['none', 'ro', 'rw']).optional(),
   accessMode: z.enum(['OPEN_ACCESS', 'APPROVAL_REQUIRED']).optional(),
@@ -78,6 +116,58 @@ function normalizeAssignedSkills(value) {
   return Array.isArray(value)
     ? [...new Set(value.map((skill) => String(skill || '').trim()).filter(Boolean))]
     : [];
+}
+
+function normalizeTimeValue(value, fallback) {
+  const normalized = String(value || '').trim();
+  const match = normalized.match(hourPattern);
+  if (!match) {
+    return fallback;
+  }
+
+  const hours = Number(match[1]);
+  const minutes = Number(match[2] || '00');
+  if (!Number.isInteger(hours) || hours < 0 || hours > 23) {
+    return fallback;
+  }
+  if (!Number.isInteger(minutes) || minutes < 0 || minutes > 59) {
+    return fallback;
+  }
+
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+}
+
+function normalizeAppointmentSchedulerConfig(value) {
+  const raw = value && typeof value === 'object' ? value : {};
+  const workingDays = Array.isArray(raw.workingDays)
+    ? [...new Set(raw.workingDays
+      .map((day) => Number(day))
+      .filter((day) => Number.isInteger(day) && day >= 0 && day <= 6))].sort((left, right) => left - right)
+    : APPOINTMENT_SCHEDULER_DEFAULT_CONFIG.workingDays;
+
+  return {
+    enableBooking: raw.enableBooking ?? APPOINTMENT_SCHEDULER_DEFAULT_CONFIG.enableBooking,
+    enableReschedule: raw.enableReschedule ?? APPOINTMENT_SCHEDULER_DEFAULT_CONFIG.enableReschedule,
+    enableCancellation: raw.enableCancellation ?? APPOINTMENT_SCHEDULER_DEFAULT_CONFIG.enableCancellation,
+    enableReminder: raw.enableReminder ?? APPOINTMENT_SCHEDULER_DEFAULT_CONFIG.enableReminder,
+    enableAutoSuggestSlot: raw.enableAutoSuggestSlot ?? APPOINTMENT_SCHEDULER_DEFAULT_CONFIG.enableAutoSuggestSlot,
+    defaultMeetingDuration: Number(raw.defaultMeetingDuration) > 0
+      ? Number(raw.defaultMeetingDuration)
+      : APPOINTMENT_SCHEDULER_DEFAULT_CONFIG.defaultMeetingDuration,
+    workingHoursStart: normalizeTimeValue(raw.workingHoursStart, APPOINTMENT_SCHEDULER_DEFAULT_CONFIG.workingHoursStart),
+    workingHoursEnd: normalizeTimeValue(raw.workingHoursEnd, APPOINTMENT_SCHEDULER_DEFAULT_CONFIG.workingHoursEnd),
+    workingDays,
+    timezone: String(raw.timezone || APPOINTMENT_SCHEDULER_DEFAULT_CONFIG.timezone).trim() || APPOINTMENT_SCHEDULER_DEFAULT_CONFIG.timezone,
+  };
+}
+
+function readAgentAppointmentSchedulerConfig(agent) {
+  return normalizeAppointmentSchedulerConfig(
+    agent?.configJson?.skillConfigs?.[INTERNAL_SKILL_KEYS.APPOINTMENT_SCHEDULER]
+      || agent?.configJson?.appointmentSchedulerConfig
+      || agent?.configJson?.appointmentScheduler
+      || {},
+  );
 }
 
 function normalizeSharedWorkspaceAccess(value) {
@@ -167,6 +257,7 @@ export default function AgentFormPage() {
       persona: DEFAULT_ROLE_PRESET?.persona || '',
       goal: DEFAULT_ROLE_PRESET?.goal || '',
       assignedSkills: [],
+      appointmentSchedulerConfig: APPOINTMENT_SCHEDULER_DEFAULT_CONFIG,
       systemPrompt: '',
       sharedWorkspaceAccess: 'none',
       accessMode: 'OPEN_ACCESS',
@@ -175,6 +266,8 @@ export default function AgentFormPage() {
 
   const watchAll = watch();
   const selectedSkills = normalizeAssignedSkills(watchAll.assignedSkills);
+  const appointmentSchedulerSelected = selectedSkills.includes(INTERNAL_SKILL_KEYS.APPOINTMENT_SCHEDULER);
+  const appointmentSchedulerConfig = normalizeAppointmentSchedulerConfig(watchAll.appointmentSchedulerConfig);
   const availableAdvancedRoles = getAvailableAdvancedRolePresets(installedSkills, selectedSkills);
   const selectedRolePreset = getRolePresetByKey(selectedRoleKey) || getRolePresetByRoleName(watchAll.role) || DEFAULT_ROLE_PRESET;
   const selectedAccessMode = watchAll.accessMode || 'OPEN_ACCESS';
@@ -217,6 +310,7 @@ export default function AgentFormPage() {
             persona: agent.persona,
             goal: agent.goal,
             assignedSkills,
+            appointmentSchedulerConfig: readAgentAppointmentSchedulerConfig(agent),
             systemPrompt: agent.configJson?.systemPrompt || '',
             sharedWorkspaceAccess: currentTier === 'FREE'
               ? 'none'
@@ -246,6 +340,9 @@ export default function AgentFormPage() {
       const payload = {
         ...data,
         assignedSkills: workspaceTier === 'FREE' ? [] : normalizeAssignedSkills(data.assignedSkills),
+        appointmentSchedulerConfig: workspaceTier === 'FREE' || !normalizeAssignedSkills(data.assignedSkills).includes(INTERNAL_SKILL_KEYS.APPOINTMENT_SCHEDULER)
+          ? undefined
+          : normalizeAppointmentSchedulerConfig(data.appointmentSchedulerConfig),
         systemPrompt: data.systemPrompt || '',
         sharedWorkspaceAccess: workspaceTier === 'FREE'
           ? 'none'
@@ -272,6 +369,18 @@ export default function AgentFormPage() {
       : [...selectedSkills, skillKey];
 
     setValue('assignedSkills', nextSkills, { shouldDirty: true, shouldValidate: true });
+  };
+
+  const toggleAppointmentWorkingDay = (dayValue) => {
+    const nextDays = appointmentSchedulerConfig.workingDays.includes(dayValue)
+      ? appointmentSchedulerConfig.workingDays.filter((day) => day !== dayValue)
+      : [...appointmentSchedulerConfig.workingDays, dayValue].sort((left, right) => left - right);
+
+    setValue('appointmentSchedulerConfig.workingDays', nextDays, { shouldDirty: true, shouldValidate: true });
+  };
+
+  const setAppointmentSchedulerField = (field, value) => {
+    setValue(`appointmentSchedulerConfig.${field}`, value, { shouldDirty: true, shouldValidate: true });
   };
 
   const applyRolePreset = (preset) => {
@@ -483,6 +592,11 @@ export default function AgentFormPage() {
                                 Unlocks Billing Assistant role dan membuat agent ini siap dipakai untuk reminder pembayaran.
                               </p>
                             )}
+                            {skill.skillKey === INTERNAL_SKILL_KEYS.APPOINTMENT_SCHEDULER && (
+                              <p className="mt-2 text-[11px] text-sky-300">
+                                Unlocks Scheduler Assistant, Sales Assistant, dan Support Coordinator sekaligus menyalakan config slot availability agent.
+                              </p>
+                            )}
                           </div>
                         </label>
                       );
@@ -496,6 +610,121 @@ export default function AgentFormPage() {
                   <p className="text-xs text-blue-300">
                     Skill aktif saat ini: {selectedSkills.join(', ')}
                   </p>
+                )}
+
+                {appointmentSchedulerSelected && (
+                  <div className="rounded-xl border border-sky-500/30 bg-sky-500/10 p-4 space-y-4">
+                    <div className="space-y-1">
+                      <Label>Appointment Scheduler Capability</Label>
+                      <p className="text-xs text-sky-100/80">
+                        Konfigurasi ini menentukan apakah agent boleh menerima booking, reschedule, cancellation, reminder, dan auto-suggest slot.
+                      </p>
+                    </div>
+
+                    <div className="grid gap-3 md:grid-cols-2">
+                      {[
+                        ['enableBooking', 'Enable Booking'],
+                        ['enableReschedule', 'Enable Reschedule'],
+                        ['enableCancellation', 'Enable Cancellation'],
+                        ['enableReminder', 'Enable Reminder'],
+                        ['enableAutoSuggestSlot', 'Enable Auto Suggest Slot'],
+                      ].map(([field, label]) => (
+                        <label key={field} className="flex items-center justify-between rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2 text-sm text-slate-200">
+                          <span>{label}</span>
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4 rounded border-slate-600 bg-slate-950"
+                            checked={Boolean(appointmentSchedulerConfig[field])}
+                            onChange={(event) => setAppointmentSchedulerField(field, event.target.checked)}
+                          />
+                        </label>
+                      ))}
+                    </div>
+
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <div className="space-y-2">
+                        <Label>Default Meeting Duration (minutes)</Label>
+                        <Input
+                          type="number"
+                          min="15"
+                          max="480"
+                          className="bg-slate-900 border-slate-700"
+                          value={appointmentSchedulerConfig.defaultMeetingDuration}
+                          onChange={(event) => setAppointmentSchedulerField('defaultMeetingDuration', Number(event.target.value || 60))}
+                        />
+                      </div>
+
+                      <div className="space-y-2">
+                        <Label>Timezone</Label>
+                        <Input
+                          className="bg-slate-900 border-slate-700"
+                          value={appointmentSchedulerConfig.timezone}
+                          onChange={(event) => setAppointmentSchedulerField('timezone', event.target.value)}
+                          placeholder="Asia/Jakarta"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <div className="space-y-2">
+                        <Label>Working Hours Start</Label>
+                        <Input
+                          className="bg-slate-900 border-slate-700"
+                          value={appointmentSchedulerConfig.workingHoursStart}
+                          onChange={(event) => setAppointmentSchedulerField('workingHoursStart', event.target.value)}
+                          placeholder="09:00"
+                        />
+                      </div>
+
+                      <div className="space-y-2">
+                        <Label>Working Hours End</Label>
+                        <Input
+                          className="bg-slate-900 border-slate-700"
+                          value={appointmentSchedulerConfig.workingHoursEnd}
+                          onChange={(event) => setAppointmentSchedulerField('workingHoursEnd', event.target.value)}
+                          placeholder="17:00"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label>Working Days</Label>
+                      <div className="flex flex-wrap gap-2">
+                        {WEEKDAY_OPTIONS.map((option) => {
+                          const selected = appointmentSchedulerConfig.workingDays.includes(option.value);
+                          return (
+                            <button
+                              key={option.value}
+                              type="button"
+                              onClick={() => toggleAppointmentWorkingDay(option.value)}
+                              className={cn(
+                                'rounded-full border px-3 py-2 text-xs font-medium transition',
+                                selected
+                                  ? 'border-sky-400/40 bg-sky-500/10 text-sky-100'
+                                  : 'border-slate-700 bg-slate-900/80 text-slate-300 hover:border-slate-600 hover:text-white',
+                              )}
+                            >
+                              {option.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-slate-700 bg-slate-950/70 p-4 space-y-2">
+                      <p className="text-xs uppercase tracking-[0.24em] text-slate-500">Slot Availability Preview</p>
+                      <p className="text-sm text-slate-200">
+                        {appointmentSchedulerConfig.workingDays.length > 0
+                          ? `${appointmentSchedulerConfig.workingDays
+                            .map((day) => WEEKDAY_OPTIONS.find((option) => option.value === day)?.label || day)
+                            .join(', ')} · ${appointmentSchedulerConfig.workingHoursStart} - ${appointmentSchedulerConfig.workingHoursEnd} · ${appointmentSchedulerConfig.timezone}`
+                          : 'Belum ada hari kerja yang dipilih.'}
+                      </p>
+                      <p className="text-xs text-slate-400">
+                        Backend akan menyinkronkan preview ini ke tabel availability agent untuk validasi booking dan reminder worker.
+                      </p>
+                    </div>
+                  </div>
                 )}
               </div>
             )}

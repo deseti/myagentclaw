@@ -112,6 +112,30 @@ enum PaymentReminderStatus {
   CANCELLED
 }
 
+enum AppointmentScheduleStatus {
+  PENDING
+  CONFIRMED
+  COMPLETED
+  CANCELLED
+  RESCHEDULED
+  MISSED
+}
+
+enum AppointmentType {
+  SALES_CALL
+  DEMO
+  CONSULTATION
+  SUPPORT
+  FOLLOW_UP
+  CUSTOM
+}
+
+enum AppointmentLocationType {
+  ONLINE
+  OFFLINE
+  PHONE_CALL
+}
+
 enum SubscriptionStatus {
   ACTIVE
   GRACE
@@ -241,6 +265,9 @@ model Workspace {
   polymarketAutopilotHealthChecks PolymarketAutopilotHealthCheck[]
   polymarketAutopilotAlerts PolymarketAutopilotAlert[]
   paymentReminders PaymentReminder[]
+  appointmentSchedules AppointmentSchedule[]
+  appointmentAvailabilities AppointmentAvailability[]
+  appointmentActivityLogs AppointmentActivityLog[]
 
   @@map("workspaces")
 }
@@ -448,6 +475,8 @@ model Agent {
   conversations Conversation[]
   customerAccesses AgentCustomerAccess[]
   paymentReminders PaymentReminder[]
+  appointmentSchedules AppointmentSchedule[]
+  appointmentAvailabilities AppointmentAvailability[]
 
   @@map("agents")
 }
@@ -511,6 +540,7 @@ model Customer {
   conversations     Conversation[]
   followUps         FollowUp[]
   paymentReminders  PaymentReminder[]
+  appointmentSchedules AppointmentSchedule[]
 
   @@unique([workspaceId, phoneNumber])
   @@index([workspaceId])
@@ -645,6 +675,89 @@ model PaymentReminder {
   @@index([workspaceId, agentId])
   @@index([conversationId])
   @@map("payment_reminders")
+}
+
+model AppointmentSchedule {
+  id               String                    @id @default(cuid())
+  workspaceId      String                    @map("workspace_id")
+  agentId          String                    @map("agent_id")
+  customerId       String                    @map("customer_id")
+  title            String
+  description      String?
+  appointmentType  AppointmentType           @map("appointment_type")
+  status           AppointmentScheduleStatus @default(PENDING)
+  scheduledAt      DateTime                  @map("scheduled_at")
+  endAt            DateTime                  @map("end_at")
+  timezone         String
+  locationType     AppointmentLocationType   @map("location_type")
+  meetingLink      String?                   @map("meeting_link")
+  physicalLocation String?                   @map("physical_location")
+  notes            String?
+  reminder24hSent  Boolean                   @default(false) @map("reminder_24h_sent")
+  reminder1hSent   Boolean                   @default(false) @map("reminder_1h_sent")
+  missedFollowUpSent Boolean                 @default(false) @map("missed_follow_up_sent")
+  missedFollowUpSentAt DateTime?            @map("missed_follow_up_sent_at")
+  missedFollowUpLockedAt DateTime?          @map("missed_follow_up_locked_at")
+  cancelledAt      DateTime?                 @map("cancelled_at")
+  completedAt      DateTime?                 @map("completed_at")
+  createdAt        DateTime                  @default(now()) @map("created_at")
+  updatedAt        DateTime                  @updatedAt @map("updated_at")
+
+  workspace        Workspace                 @relation(fields: [workspaceId], references: [id])
+  agent            Agent                     @relation(fields: [agentId], references: [id])
+  customer         Customer                  @relation(fields: [customerId], references: [id])
+  activityLogs     AppointmentActivityLog[]
+
+  @@index([workspaceId])
+  @@index([agentId])
+  @@index([customerId])
+  @@index([scheduledAt])
+  @@index([status])
+  @@map("appointment_schedules")
+}
+
+model AppointmentAvailability {
+  id          String    @id @default(cuid())
+  workspaceId String    @map("workspace_id")
+  agentId     String    @map("agent_id")
+  dayOfWeek   Int       @map("day_of_week")
+  startHour   String    @map("start_hour")
+  endHour     String    @map("end_hour")
+  timezone    String
+  isEnabled   Boolean   @default(true) @map("is_enabled")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  workspace   Workspace @relation(fields: [workspaceId], references: [id])
+  agent       Agent     @relation(fields: [agentId], references: [id])
+
+  @@index([workspaceId])
+  @@index([agentId])
+  @@index([dayOfWeek])
+  @@index([workspaceId, agentId, dayOfWeek])
+  @@map("appointment_availability")
+}
+
+model AppointmentActivityLog {
+  id             String                    @id @default(cuid())
+  workspaceId    String                    @map("workspace_id")
+  appointmentId  String                    @map("appointment_id")
+  actionType     String                    @map("action_type")
+  actionBy       String                    @map("action_by")
+  previousStatus AppointmentScheduleStatus? @map("previous_status")
+  newStatus      AppointmentScheduleStatus? @map("new_status")
+  notes          String?
+  createdAt      DateTime                  @default(now()) @map("created_at")
+
+  workspace      Workspace                 @relation(fields: [workspaceId], references: [id])
+  appointment    AppointmentSchedule       @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+  @@index([appointmentId])
+  @@index([actionType])
+  @@index([createdAt])
+  @@index([workspaceId, appointmentId, createdAt])
+  @@map("appointment_activity_logs")
 }
 
 // ─────────────────────────────────────────────

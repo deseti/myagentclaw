@@ -15,6 +15,18 @@ function trimString(value) {
   return normalized || null;
 }
 
+function normalizeSkillConfigMap(value) {
+  const raw = asPlainObject(value);
+  const entries = Object.entries(raw)
+    .filter(([key, config]) => String(key || '').trim() && config && typeof config === 'object' && !Array.isArray(config));
+
+  if (entries.length === 0) {
+    return null;
+  }
+
+  return Object.fromEntries(entries.map(([key, config]) => [String(key).trim(), { ...config }]));
+}
+
 export function normalizeSharedWorkspaceAccess(value) {
   const normalized = String(value ?? '').trim().toLowerCase();
   return SHARED_WORKSPACE_ACCESS_VALUES.has(normalized) ? normalized : 'none';
@@ -37,6 +49,22 @@ export function getAgentConfigJson(agentOrConfig) {
     return asPlainObject(agentOrConfig.configJson);
   }
   return asPlainObject(agentOrConfig);
+}
+
+export function getAgentSkillConfigs(agent) {
+  const config = getAgentConfigJson(agent);
+  return normalizeSkillConfigMap(config.skillConfigs) || {};
+}
+
+export function getAgentSkillConfig(agent, skillKey) {
+  const normalizedSkillKey = String(skillKey || '').trim().toLowerCase();
+  if (!normalizedSkillKey) {
+    return null;
+  }
+
+  const skillConfigs = getAgentSkillConfigs(agent);
+  const matchedEntry = Object.entries(skillConfigs).find(([key]) => String(key || '').trim().toLowerCase() === normalizedSkillKey);
+  return matchedEntry?.[1] || null;
 }
 
 export function getAgentAssignedSkills(agent) {
@@ -98,6 +126,29 @@ export function mergeAgentConfig(existingConfig, payload) {
     else delete next.assignedSkills;
   }
 
+  if (
+    Object.prototype.hasOwnProperty.call(payload, 'skillConfigs')
+    || Object.prototype.hasOwnProperty.call(payload, 'appointmentSchedulerConfig')
+  ) {
+    const nextSkillConfigs = {
+      ...getAgentSkillConfigs(existingConfig),
+      ...(normalizeSkillConfigMap(payload.skillConfigs) || {}),
+    };
+
+    if (Object.prototype.hasOwnProperty.call(payload, 'appointmentSchedulerConfig')) {
+      const appointmentSchedulerConfig = asPlainObject(payload.appointmentSchedulerConfig);
+      if (Object.keys(appointmentSchedulerConfig).length > 0) {
+        nextSkillConfigs['appointment-scheduler'] = appointmentSchedulerConfig;
+      } else {
+        delete nextSkillConfigs['appointment-scheduler'];
+      }
+    }
+
+    const normalizedSkillConfigs = normalizeSkillConfigMap(nextSkillConfigs);
+    if (normalizedSkillConfigs) next.skillConfigs = normalizedSkillConfigs;
+    else delete next.skillConfigs;
+  }
+
   if (Object.prototype.hasOwnProperty.call(payload, 'sharedWorkspaceAccess')) {
     const sharedWorkspaceAccess = normalizeSharedWorkspaceAccess(payload.sharedWorkspaceAccess);
     if (sharedWorkspaceAccess !== 'none') next.sharedWorkspaceAccess = sharedWorkspaceAccess;
@@ -109,6 +160,7 @@ export function mergeAgentConfig(existingConfig, payload) {
 
 export function buildGatewayAgentConfig(agent, extra = {}) {
   const assignedSkills = getAgentAssignedSkills(agent);
+  const skillConfigs = getAgentSkillConfigs(agent);
   const workspace = agent.workspace || {};
   const subTier = workspace.subTier || 'FREE';
   const accessMode = getAgentAccessMode(agent);
@@ -122,6 +174,7 @@ export function buildGatewayAgentConfig(agent, extra = {}) {
     role: getAgentRole(agent) || 'AI Assistant',
     systemPrompt: getAgentSystemPrompt(agent),
     assignedSkills,
+    skillConfigs,
     openclawSkill: assignedSkills[0] || '',
     workspaceId: agent.workspaceId,
     agentId: agent.id,
