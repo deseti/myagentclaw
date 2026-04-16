@@ -4,7 +4,7 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
-    setupFiles: ['./tests/setup.js'],
+    setupFiles: process.env.VITEST_SKIP_DB_SETUP === 'true' ? [] : ['./tests/setup.js'],
     // Jalankan test secara berurutan untuk menghindari race condition DB
     pool: 'forks',
     poolOptions: {

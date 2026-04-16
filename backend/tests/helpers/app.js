@@ -37,12 +37,14 @@ export async function buildApp() {
     const { default: agentRoute } = await import('../../src/routes/agent.route.js');
     const { default: billingRoute } = await import('../../src/routes/billing.route.js');
     const { default: conversationRoute } = await import('../../src/routes/conversation.route.js');
+    const { default: crmRoute } = await import('../../src/routes/crm.route.js');
     const { default: webhookRoute } = await import('../../src/routes/webhook.route.js');
 
     api.register(authRoute, { prefix: '/auth' });
     api.register(agentRoute, { prefix: '/agents' });
     api.register(billingRoute, { prefix: '/billing' });
     api.register(conversationRoute, { prefix: '/conversations' });
+    api.register(crmRoute, { prefix: '/crm' });
     api.register(webhookRoute, { prefix: '/webhooks' });
   }, { prefix: '/api' });
 

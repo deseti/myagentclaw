@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import {
-  LayoutDashboard, Bot, MessageSquare, BookOpen, Inbox, Users, CreditCard, LogOut, Wrench, Menu, X, LineChart, Wallet, CalendarDays,
+  LayoutDashboard, Bot, MessageSquare, BookOpen, Inbox, Users, CreditCard, LogOut, Wrench, Menu, X, LineChart, Wallet, CalendarDays, GitBranch,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { logout, isAuthenticated } from '@/lib/auth';
@@ -22,6 +22,7 @@ import { useDashboardStore } from '@/store/workspace.store';
 const POLYMARKET_MINIMUM_TIER = getInternalSkillDefinition(INTERNAL_SKILL_KEYS.POLYMARKET_READ_ONLY)?.minimumTier || 'GROWTH';
 const PAYMENT_REMINDER_MINIMUM_TIER = getInternalSkillDefinition(INTERNAL_SKILL_KEYS.PAYMENT_REMINDER)?.minimumTier || 'STARTER';
 const APPOINTMENT_SCHEDULER_MINIMUM_TIER = getInternalSkillDefinition(INTERNAL_SKILL_KEYS.APPOINTMENT_SCHEDULER)?.minimumTier || 'STARTER';
+const CRM_PIPELINE_MINIMUM_TIER = getInternalSkillDefinition(INTERNAL_SKILL_KEYS.CRM_PIPELINE)?.minimumTier || 'STARTER';
 
 const NAV_ITEMS = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -31,6 +32,7 @@ const NAV_ITEMS = [
   { href: '/dashboard/polymarket', label: 'Polymarket', icon: LineChart },
   { href: '/dashboard/payment-reminder', label: 'Payment Reminder', icon: Wallet },
   { href: '/dashboard/appointment-scheduler', label: 'Appointment Scheduler', icon: CalendarDays },
+  { href: '/dashboard/crm-pipeline', label: 'CRM Pipeline', icon: GitBranch },
   { href: '/dashboard/knowledge', label: 'Knowledge Base', icon: BookOpen },
   { href: '/dashboard/conversations', label: 'Percakapan', icon: Inbox, badge: 'needsAdmin' },
   { href: '/dashboard/customers', label: 'Customer', icon: Users },
@@ -110,6 +112,7 @@ export default function DashboardLayout({ children }) {
   const [hasActivePolymarketSkill, setHasActivePolymarketSkill] = useState(false);
   const [hasActivePaymentReminderSkill, setHasActivePaymentReminderSkill] = useState(false);
   const [hasActiveAppointmentSchedulerSkill, setHasActiveAppointmentSchedulerSkill] = useState(false);
+  const [hasActiveCrmPipelineSkill, setHasActiveCrmPipelineSkill] = useState(false);
 
   const handleLogout = () => logout();
   const navItems = NAV_ITEMS.filter((item) => {
@@ -118,6 +121,7 @@ export default function DashboardLayout({ children }) {
       || item.href === '/dashboard/polymarket'
       || item.href === '/dashboard/payment-reminder'
       || item.href === '/dashboard/appointment-scheduler'
+      || item.href === '/dashboard/crm-pipeline'
     )) {
       return false;
     }
@@ -131,6 +135,10 @@ export default function DashboardLayout({ children }) {
     }
 
     if (item.href === '/dashboard/appointment-scheduler' && !hasActiveAppointmentSchedulerSkill) {
+      return false;
+    }
+
+    if (item.href === '/dashboard/crm-pipeline' && !hasActiveCrmPipelineSkill) {
       return false;
     }
 
@@ -178,16 +186,21 @@ export default function DashboardLayout({ children }) {
           const polymarketEligible = canAccessInternalSkill(nextTier, POLYMARKET_MINIMUM_TIER);
           const paymentReminderEligible = canAccessInternalSkill(nextTier, PAYMENT_REMINDER_MINIMUM_TIER);
           const appointmentSchedulerEligible = canAccessInternalSkill(nextTier, APPOINTMENT_SCHEDULER_MINIMUM_TIER);
+          const crmPipelineEligible = canAccessInternalSkill(nextTier, CRM_PIPELINE_MINIMUM_TIER);
           setWorkspaceTier(nextTier);
 
           if (nextTier === 'FREE') {
             setHasActivePolymarketSkill(false);
             setHasActivePaymentReminderSkill(false);
             setHasActiveAppointmentSchedulerSkill(false);
+            setHasActiveCrmPipelineSkill(false);
             if (pathname.startsWith('/dashboard/payment-reminder')) {
               router.replace('/dashboard/skills');
             }
             if (pathname.startsWith('/dashboard/appointment-scheduler')) {
+              router.replace('/dashboard/skills');
+            }
+            if (pathname.startsWith('/dashboard/crm-pipeline')) {
               router.replace('/dashboard/skills');
             }
             return;
@@ -214,6 +227,13 @@ export default function DashboardLayout({ children }) {
             }
           }
 
+          if (!crmPipelineEligible) {
+            setHasActiveCrmPipelineSkill(false);
+            if (pathname.startsWith('/dashboard/crm-pipeline')) {
+              router.replace('/dashboard/skills');
+            }
+          }
+
           try {
             const { data: skillsData } = await api.get('/skills/installed');
             if (cancelled) return;
@@ -222,12 +242,15 @@ export default function DashboardLayout({ children }) {
             const polymarketSkill = getInstalledInternalSkill(installedSkills, INTERNAL_SKILL_KEYS.POLYMARKET_READ_ONLY);
             const paymentReminderSkill = getInstalledInternalSkill(installedSkills, INTERNAL_SKILL_KEYS.PAYMENT_REMINDER);
             const appointmentSchedulerSkill = getInstalledInternalSkill(installedSkills, INTERNAL_SKILL_KEYS.APPOINTMENT_SCHEDULER);
+            const crmPipelineSkill = getInstalledInternalSkill(installedSkills, INTERNAL_SKILL_KEYS.CRM_PIPELINE);
             const polymarketActive = isInternalSkillActive(polymarketSkill);
             const paymentReminderActive = paymentReminderEligible && isInternalSkillActive(paymentReminderSkill);
             const appointmentSchedulerActive = appointmentSchedulerEligible && isInternalSkillActive(appointmentSchedulerSkill);
+            const crmPipelineActive = crmPipelineEligible && isInternalSkillActive(crmPipelineSkill);
             setHasActivePolymarketSkill(polymarketActive);
             setHasActivePaymentReminderSkill(paymentReminderActive);
             setHasActiveAppointmentSchedulerSkill(appointmentSchedulerActive);
+            setHasActiveCrmPipelineSkill(crmPipelineActive);
 
             if (!polymarketActive && pathname.startsWith('/dashboard/polymarket')) {
               router.replace('/dashboard/skills');
@@ -240,11 +263,16 @@ export default function DashboardLayout({ children }) {
             if (!appointmentSchedulerActive && pathname.startsWith('/dashboard/appointment-scheduler')) {
               router.replace('/dashboard/skills');
             }
+
+            if (!crmPipelineActive && pathname.startsWith('/dashboard/crm-pipeline')) {
+              router.replace('/dashboard/skills');
+            }
           } catch {
             if (!cancelled) {
               setHasActivePolymarketSkill(false);
               setHasActivePaymentReminderSkill(false);
               setHasActiveAppointmentSchedulerSkill(false);
+              setHasActiveCrmPipelineSkill(false);
               if (pathname.startsWith('/dashboard/polymarket')) {
                 router.replace('/dashboard/skills');
               }
@@ -252,6 +280,9 @@ export default function DashboardLayout({ children }) {
                 router.replace('/dashboard/skills');
               }
               if (pathname.startsWith('/dashboard/appointment-scheduler')) {
+                router.replace('/dashboard/skills');
+              }
+              if (pathname.startsWith('/dashboard/crm-pipeline')) {
                 router.replace('/dashboard/skills');
               }
             }
@@ -264,6 +295,7 @@ export default function DashboardLayout({ children }) {
           setHasActivePolymarketSkill(false);
           setHasActivePaymentReminderSkill(false);
           setHasActiveAppointmentSchedulerSkill(false);
+          setHasActiveCrmPipelineSkill(false);
         }
       });
 

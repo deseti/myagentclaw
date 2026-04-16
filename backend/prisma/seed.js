@@ -4,6 +4,13 @@
 import { PrismaClient } from '@prisma/client'
 import bcrypt from 'bcrypt'
 import { AI_PROVIDER_DB_VALUE, getAiProviderConfig } from '../src/lib/ai-provider-config.js'
+import {
+  DEFAULT_CRM_PIPELINE_DESCRIPTION,
+  DEFAULT_CRM_PIPELINE_NAME,
+  DEFAULT_CRM_PIPELINE_STAGES,
+  getDefaultCrmPipelineId,
+  getDefaultCrmStageId,
+} from '../src/lib/crm-pipeline.js'
 
 const prisma = new PrismaClient()
 const aiProviderConfig = getAiProviderConfig()
@@ -134,6 +141,50 @@ async function main() {
     },
   })
   console.log(`✅ Quota Usage: ${monthYear}, 0/1500 used`)
+
+  // 7. CRM Pipeline default
+  const crmPipeline = await prisma.crmPipeline.upsert({
+    where: {
+      workspaceId_name: {
+        workspaceId: workspace.id,
+        name: DEFAULT_CRM_PIPELINE_NAME,
+      },
+    },
+    update: {},
+    create: {
+      id: getDefaultCrmPipelineId(workspace.id),
+      workspaceId: workspace.id,
+      name: DEFAULT_CRM_PIPELINE_NAME,
+      description: DEFAULT_CRM_PIPELINE_DESCRIPTION,
+      isDefault: true,
+      isActive: true,
+    },
+  })
+
+  for (const stage of DEFAULT_CRM_PIPELINE_STAGES) {
+    await prisma.crmPipelineStage.upsert({
+      where: {
+        pipelineId_position: {
+          pipelineId: crmPipeline.id,
+          position: stage.position,
+        },
+      },
+      update: {},
+      create: {
+        id: getDefaultCrmStageId(workspace.id, stage.position),
+        pipelineId: crmPipeline.id,
+        name: stage.name,
+        description: stage.description,
+        color: stage.color,
+        position: stage.position,
+        probabilityPercent: stage.probabilityPercent,
+        isDefault: stage.isDefault,
+        isClosedWon: stage.isClosedWon,
+        isClosedLost: stage.isClosedLost,
+      },
+    })
+  }
+  console.log('✅ CRM Pipeline: default Sales Pipeline tersedia')
 
   console.log('\n🎉 Seed selesai!')
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━')

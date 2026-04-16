@@ -24,7 +24,12 @@ export const INTERNAL_SKILL_DEFINITIONS = [
     minimumTier: 'STARTER',
     isComingSoon: false,
   },
-  { key: INTERNAL_SKILL_KEYS.CRM_PIPELINE, minimumTier: 'STARTER', isComingSoon: true },
+  {
+    key: INTERNAL_SKILL_KEYS.CRM_PIPELINE,
+    displayName: 'CRM Pipeline',
+    minimumTier: 'STARTER',
+    isComingSoon: false,
+  },
   { key: INTERNAL_SKILL_KEYS.BROADCAST_CAMPAIGN, minimumTier: 'STARTER', isComingSoon: true },
   { key: INTERNAL_SKILL_KEYS.ANALYTICS_DASHBOARD, minimumTier: 'GROWTH', isComingSoon: true },
   { key: INTERNAL_SKILL_KEYS.ORDER_TRACKING, minimumTier: 'GROWTH', isComingSoon: true },

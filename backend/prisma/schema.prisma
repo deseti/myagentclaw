@@ -136,6 +136,29 @@ enum AppointmentLocationType {
   PHONE_CALL
 }
 
+enum CrmPipelinePriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum CrmPipelineActivityType {
+  CREATED
+  STAGE_CHANGED
+  NOTE_ADDED
+  APPOINTMENT_CREATED
+  APPOINTMENT_COMPLETED
+  PAYMENT_SENT
+  PAYMENT_COMPLETED
+  LOST
+  WON
+  ASSIGNED_AGENT_CHANGED
+  LEAD_ARCHIVED
+  LEAD_RESTORED
+  LEAD_DELETED
+}
+
 enum SubscriptionStatus {
   ACTIVE
   GRACE
@@ -232,6 +255,8 @@ model Owner {
   updatedAt     DateTime    @updatedAt @map("updated_at")
 
   workspaces    Workspace[]
+  crmPipelineActivitiesAuthored CrmPipelineActivity[] @relation("CrmActivityCreatedByUser")
+  crmPipelineNotesAuthored      CrmPipelineNote[]     @relation("CrmNoteCreatedByUser")
 
   @@map("owners")
 }
@@ -268,6 +293,10 @@ model Workspace {
   appointmentSchedules AppointmentSchedule[]
   appointmentAvailabilities AppointmentAvailability[]
   appointmentActivityLogs AppointmentActivityLog[]
+  crmPipelines CrmPipeline[]
+  crmCustomerPipelineEntries CrmCustomerPipelineEntry[]
+  crmPipelineActivities CrmPipelineActivity[]
+  crmPipelineNotes CrmPipelineNote[]
 
   @@map("workspaces")
 }
@@ -477,6 +506,7 @@ model Agent {
   paymentReminders PaymentReminder[]
   appointmentSchedules AppointmentSchedule[]
   appointmentAvailabilities AppointmentAvailability[]
+  crmCustomerPipelineEntriesAssigned CrmCustomerPipelineEntry[]
 
   @@map("agents")
 }
@@ -541,6 +571,7 @@ model Customer {
   followUps         FollowUp[]
   paymentReminders  PaymentReminder[]
   appointmentSchedules AppointmentSchedule[]
+  crmPipelineEntries CrmCustomerPipelineEntry[]
 
   @@unique([workspaceId, phoneNumber])
   @@index([workspaceId])
@@ -758,6 +789,138 @@ model AppointmentActivityLog {
   @@index([createdAt])
   @@index([workspaceId, appointmentId, createdAt])
   @@map("appointment_activity_logs")
+}
+
+model CrmPipeline {
+  id          String                     @id @default(cuid())
+  workspaceId String                     @map("workspace_id")
+  name        String
+  description String?
+  color       String                     @default("#2563eb")
+  isDefault   Boolean                    @default(false) @map("is_default")
+  isActive    Boolean                    @default(true) @map("is_active")
+  createdAt   DateTime                   @default(now()) @map("created_at")
+  updatedAt   DateTime                   @updatedAt @map("updated_at")
+
+  workspace    Workspace                 @relation(fields: [workspaceId], references: [id])
+  stages       CrmPipelineStage[]
+  entries      CrmCustomerPipelineEntry[]
+
+  @@unique([workspaceId, name])
+  @@index([workspaceId])
+  @@index([workspaceId, isActive])
+  @@index([workspaceId, isDefault])
+  @@map("crm_pipelines")
+}
+
+model CrmPipelineStage {
+  id                 String                     @id @default(cuid())
+  pipelineId         String                     @map("pipeline_id")
+  name               String
+  description        String?
+  color              String?
+  position           Int
+  probabilityPercent Int                        @default(0) @map("probability_percent")
+  isDefault          Boolean                    @default(false) @map("is_default")
+  isClosedWon        Boolean                    @default(false) @map("is_closed_won")
+  isClosedLost       Boolean                    @default(false) @map("is_closed_lost")
+  createdAt          DateTime                   @default(now()) @map("created_at")
+  updatedAt          DateTime                   @updatedAt @map("updated_at")
+
+  pipeline            CrmPipeline               @relation(fields: [pipelineId], references: [id], onDelete: Cascade)
+  entries             CrmCustomerPipelineEntry[]
+  previousActivities  CrmPipelineActivity[]     @relation("CrmActivityPreviousStage")
+  newActivities       CrmPipelineActivity[]     @relation("CrmActivityNewStage")
+
+  @@unique([pipelineId, position])
+  @@index([pipelineId])
+  @@index([pipelineId, position])
+  @@map("crm_pipeline_stages")
+}
+
+model CrmCustomerPipelineEntry {
+  id                String                    @id @default(cuid())
+  workspaceId       String                    @map("workspace_id")
+  customerId        String                    @map("customer_id")
+  pipelineId        String                    @map("pipeline_id")
+  stageId           String                    @map("stage_id")
+  assignedAgentId   String?                   @map("assigned_agent_id")
+  title             String
+  valueAmount       Decimal?                  @map("value_amount") @db.Decimal(12, 2)
+  currency          String                    @default("IDR")
+  priority          CrmPipelinePriority       @default(MEDIUM)
+  expectedCloseDate DateTime?                 @map("expected_close_date")
+  lastActivityAt    DateTime?                 @map("last_activity_at")
+  source            String?
+  lostReason        String?                   @map("lost_reason")
+  notes             String?
+  isArchived        Boolean                   @default(false) @map("is_archived")
+  archivedAt        DateTime?                 @map("archived_at")
+  createdAt         DateTime                  @default(now()) @map("created_at")
+  updatedAt         DateTime                  @updatedAt @map("updated_at")
+
+  workspace         Workspace                 @relation(fields: [workspaceId], references: [id])
+  customer          Customer                  @relation(fields: [customerId], references: [id])
+  pipeline          CrmPipeline               @relation(fields: [pipelineId], references: [id])
+  stage             CrmPipelineStage          @relation(fields: [stageId], references: [id])
+  assignedAgent     Agent?                    @relation(fields: [assignedAgentId], references: [id], onDelete: SetNull)
+  activities        CrmPipelineActivity[]
+  pipelineNotes     CrmPipelineNote[]
+
+  @@index([workspaceId])
+  @@index([customerId])
+  @@index([stageId])
+  @@index([assignedAgentId])
+  @@index([lastActivityAt])
+  @@index([expectedCloseDate])
+  @@index([workspaceId, pipelineId, isArchived])
+  @@index([workspaceId, stageId, isArchived])
+  @@index([workspaceId, customerId])
+  @@map("crm_customer_pipeline_entries")
+}
+
+model CrmPipelineActivity {
+  id                    String                  @id @default(cuid())
+  workspaceId           String                  @map("workspace_id")
+  customerPipelineEntryId String                @map("customer_pipeline_entry_id")
+  type                  CrmPipelineActivityType
+  previousStageId       String?                 @map("previous_stage_id")
+  newStageId            String?                 @map("new_stage_id")
+  note                  String?
+  metadataJson          Json?                   @map("metadata_json")
+  createdByUserId       String?                 @map("created_by_user_id")
+  createdAt             DateTime                @default(now()) @map("created_at")
+
+  workspace             Workspace               @relation(fields: [workspaceId], references: [id])
+  customerPipelineEntry CrmCustomerPipelineEntry @relation(fields: [customerPipelineEntryId], references: [id], onDelete: Cascade)
+  previousStage         CrmPipelineStage?       @relation("CrmActivityPreviousStage", fields: [previousStageId], references: [id], onDelete: SetNull)
+  newStage              CrmPipelineStage?       @relation("CrmActivityNewStage", fields: [newStageId], references: [id], onDelete: SetNull)
+  createdByUser         Owner?                  @relation("CrmActivityCreatedByUser", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId])
+  @@index([customerPipelineEntryId])
+  @@index([createdAt])
+  @@index([workspaceId, customerPipelineEntryId, createdAt])
+  @@map("crm_pipeline_activities")
+}
+
+model CrmPipelineNote {
+  id                    String                   @id @default(cuid())
+  workspaceId           String                   @map("workspace_id")
+  customerPipelineEntryId String                 @map("customer_pipeline_entry_id")
+  content               String
+  createdByUserId       String?                  @map("created_by_user_id")
+  createdAt             DateTime                 @default(now()) @map("created_at")
+  updatedAt             DateTime                 @updatedAt @map("updated_at")
+
+  workspace             Workspace                @relation(fields: [workspaceId], references: [id])
+  customerPipelineEntry CrmCustomerPipelineEntry @relation(fields: [customerPipelineEntryId], references: [id], onDelete: Cascade)
+  createdByUser         Owner?                   @relation("CrmNoteCreatedByUser", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId])
+  @@index([customerPipelineEntryId])
+  @@index([workspaceId, customerPipelineEntryId, createdAt])
+  @@map("crm_pipeline_notes")
 }
 
 // ─────────────────────────────────────────────

@@ -76,6 +76,13 @@ const APPOINTMENT_SCHEDULER_DEFAULT_CONFIG = {
   timezone: 'Asia/Jakarta',
 };
 
+const CRM_PIPELINE_DEFAULT_CONFIG = {
+  canManagePipeline: true,
+  canMoveStage: true,
+  canAssignLead: true,
+  canViewAnalytics: true,
+};
+
 const WEEKDAY_OPTIONS = [
   { value: 1, label: 'Mon' },
   { value: 2, label: 'Tue' },
@@ -106,6 +113,12 @@ const agentSchema = z.object({
     workingHoursEnd: z.string().regex(hourPattern, 'Jam selesai tidak valid').optional(),
     workingDays: z.array(z.number().int().min(0).max(6)).max(7).optional(),
     timezone: z.string().min(1).max(120).optional(),
+  }).optional(),
+  crmPipelineConfig: z.object({
+    canManagePipeline: z.boolean().optional(),
+    canMoveStage: z.boolean().optional(),
+    canAssignLead: z.boolean().optional(),
+    canViewAnalytics: z.boolean().optional(),
   }).optional(),
   systemPrompt: z.string().max(12000, 'System prompt maksimal 12000 karakter').optional(),
   sharedWorkspaceAccess: z.enum(['none', 'ro', 'rw']).optional(),
@@ -166,6 +179,26 @@ function readAgentAppointmentSchedulerConfig(agent) {
     agent?.configJson?.skillConfigs?.[INTERNAL_SKILL_KEYS.APPOINTMENT_SCHEDULER]
       || agent?.configJson?.appointmentSchedulerConfig
       || agent?.configJson?.appointmentScheduler
+      || {},
+  );
+}
+
+function normalizeCrmPipelineConfig(value) {
+  const raw = value && typeof value === 'object' ? value : {};
+
+  return {
+    canManagePipeline: raw.canManagePipeline ?? CRM_PIPELINE_DEFAULT_CONFIG.canManagePipeline,
+    canMoveStage: raw.canMoveStage ?? CRM_PIPELINE_DEFAULT_CONFIG.canMoveStage,
+    canAssignLead: raw.canAssignLead ?? CRM_PIPELINE_DEFAULT_CONFIG.canAssignLead,
+    canViewAnalytics: raw.canViewAnalytics ?? CRM_PIPELINE_DEFAULT_CONFIG.canViewAnalytics,
+  };
+}
+
+function readAgentCrmPipelineConfig(agent) {
+  return normalizeCrmPipelineConfig(
+    agent?.configJson?.skillConfigs?.[INTERNAL_SKILL_KEYS.CRM_PIPELINE]
+      || agent?.configJson?.crmPipelineConfig
+      || agent?.configJson?.crmPipeline
       || {},
   );
 }
@@ -258,6 +291,7 @@ export default function AgentFormPage() {
       goal: DEFAULT_ROLE_PRESET?.goal || '',
       assignedSkills: [],
       appointmentSchedulerConfig: APPOINTMENT_SCHEDULER_DEFAULT_CONFIG,
+      crmPipelineConfig: CRM_PIPELINE_DEFAULT_CONFIG,
       systemPrompt: '',
       sharedWorkspaceAccess: 'none',
       accessMode: 'OPEN_ACCESS',
@@ -268,6 +302,8 @@ export default function AgentFormPage() {
   const selectedSkills = normalizeAssignedSkills(watchAll.assignedSkills);
   const appointmentSchedulerSelected = selectedSkills.includes(INTERNAL_SKILL_KEYS.APPOINTMENT_SCHEDULER);
   const appointmentSchedulerConfig = normalizeAppointmentSchedulerConfig(watchAll.appointmentSchedulerConfig);
+  const crmPipelineSelected = selectedSkills.includes(INTERNAL_SKILL_KEYS.CRM_PIPELINE);
+  const crmPipelineConfig = normalizeCrmPipelineConfig(watchAll.crmPipelineConfig);
   const availableAdvancedRoles = getAvailableAdvancedRolePresets(installedSkills, selectedSkills);
   const selectedRolePreset = getRolePresetByKey(selectedRoleKey) || getRolePresetByRoleName(watchAll.role) || DEFAULT_ROLE_PRESET;
   const selectedAccessMode = watchAll.accessMode || 'OPEN_ACCESS';
@@ -311,6 +347,7 @@ export default function AgentFormPage() {
             goal: agent.goal,
             assignedSkills,
             appointmentSchedulerConfig: readAgentAppointmentSchedulerConfig(agent),
+            crmPipelineConfig: readAgentCrmPipelineConfig(agent),
             systemPrompt: agent.configJson?.systemPrompt || '',
             sharedWorkspaceAccess: currentTier === 'FREE'
               ? 'none'
@@ -343,6 +380,9 @@ export default function AgentFormPage() {
         appointmentSchedulerConfig: workspaceTier === 'FREE' || !normalizeAssignedSkills(data.assignedSkills).includes(INTERNAL_SKILL_KEYS.APPOINTMENT_SCHEDULER)
           ? undefined
           : normalizeAppointmentSchedulerConfig(data.appointmentSchedulerConfig),
+        crmPipelineConfig: workspaceTier === 'FREE' || !normalizeAssignedSkills(data.assignedSkills).includes(INTERNAL_SKILL_KEYS.CRM_PIPELINE)
+          ? undefined
+          : normalizeCrmPipelineConfig(data.crmPipelineConfig),
         systemPrompt: data.systemPrompt || '',
         sharedWorkspaceAccess: workspaceTier === 'FREE'
           ? 'none'
@@ -381,6 +421,10 @@ export default function AgentFormPage() {
 
   const setAppointmentSchedulerField = (field, value) => {
     setValue(`appointmentSchedulerConfig.${field}`, value, { shouldDirty: true, shouldValidate: true });
+  };
+
+  const setCrmPipelineField = (field, value) => {
+    setValue(`crmPipelineConfig.${field}`, value, { shouldDirty: true, shouldValidate: true });
   };
 
   const applyRolePreset = (preset) => {
@@ -597,6 +641,11 @@ export default function AgentFormPage() {
                                 Unlocks Scheduler Assistant, Sales Assistant, dan Support Coordinator sekaligus menyalakan config slot availability agent.
                               </p>
                             )}
+                            {skill.skillKey === INTERNAL_SKILL_KEYS.CRM_PIPELINE && (
+                              <p className="mt-2 text-[11px] text-sky-300">
+                                Unlocks Lead Qualification role, CRM Pipeline dashboard, dan capability agent untuk manage pipeline, move stage, assign lead, serta view analytics.
+                              </p>
+                            )}
                           </div>
                         </label>
                       );
@@ -722,6 +771,49 @@ export default function AgentFormPage() {
                       </p>
                       <p className="text-xs text-slate-400">
                         Backend akan menyinkronkan preview ini ke tabel availability agent untuk validasi booking dan reminder worker.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {crmPipelineSelected && (
+                  <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-4 space-y-4">
+                    <div className="space-y-1">
+                      <Label>CRM Pipeline Capability</Label>
+                      <p className="text-xs text-emerald-100/80">
+                        Konfigurasi ini menentukan apakah agent boleh mengelola pipeline, memindahkan stage, assign lead, dan melihat analytics CRM.
+                      </p>
+                    </div>
+
+                    <div className="grid gap-3 md:grid-cols-2">
+                      {[
+                        ['canManagePipeline', 'Can Manage Pipeline'],
+                        ['canMoveStage', 'Can Move Stage'],
+                        ['canAssignLead', 'Can Assign Lead'],
+                        ['canViewAnalytics', 'Can View Analytics'],
+                      ].map(([field, label]) => (
+                        <label key={field} className="flex items-center justify-between rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2 text-sm text-slate-200">
+                          <span>{label}</span>
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4 rounded border-slate-600 bg-slate-950"
+                            checked={Boolean(crmPipelineConfig[field])}
+                            onChange={(event) => setCrmPipelineField(field, event.target.checked)}
+                          />
+                        </label>
+                      ))}
+                    </div>
+
+                    <div className="rounded-xl border border-slate-700 bg-slate-950/70 p-4 space-y-2">
+                      <p className="text-xs uppercase tracking-[0.24em] text-slate-500">Capability Summary</p>
+                      <p className="text-sm text-slate-200">
+                        {Object.entries(crmPipelineConfig)
+                          .filter(([, enabled]) => Boolean(enabled))
+                          .map(([field]) => field)
+                          .join(', ') || 'Belum ada capability CRM yang aktif.'}
+                      </p>
+                      <p className="text-xs text-slate-400">
+                        Nilai ini dikirim ke runtime agent melalui skill config map sehingga capability CRM hilang otomatis saat skill dilepas atau diuninstall.
                       </p>
                     </div>
                   </div>

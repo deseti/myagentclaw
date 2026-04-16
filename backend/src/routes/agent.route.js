@@ -131,6 +131,12 @@ const createAgentSchema = z.object({
     workingDays: z.array(z.coerce.number().int().min(0).max(6)).max(7).optional(),
     timezone: z.string().min(1).max(120).optional(),
   }).optional(),
+  crmPipelineConfig: z.object({
+    canManagePipeline: z.boolean().optional(),
+    canMoveStage: z.boolean().optional(),
+    canAssignLead: z.boolean().optional(),
+    canViewAnalytics: z.boolean().optional(),
+  }).optional(),
   sharedWorkspaceAccess: z.enum(['none', 'ro', 'rw']).optional(),
   accessMode: z.enum(['OPEN_ACCESS', 'APPROVAL_REQUIRED']).optional(),
   workspaceId: z.string().min(1),
@@ -157,6 +163,12 @@ const updateAgentSchema = z.object({
     workingDays: z.array(z.coerce.number().int().min(0).max(6)).max(7).optional(),
     timezone: z.string().min(1).max(120).optional(),
   }).optional(),
+  crmPipelineConfig: z.object({
+    canManagePipeline: z.boolean().optional(),
+    canMoveStage: z.boolean().optional(),
+    canAssignLead: z.boolean().optional(),
+    canViewAnalytics: z.boolean().optional(),
+  }).optional(),
   sharedWorkspaceAccess: z.enum(['none', 'ro', 'rw']).optional(),
   accessMode: z.enum(['OPEN_ACCESS', 'APPROVAL_REQUIRED']).optional(),
 });
@@ -168,6 +180,7 @@ function buildAgentUpdateData(existing, payload) {
     openclawSkill,
     assignedSkills,
     appointmentSchedulerConfig,
+    crmPipelineConfig,
     sharedWorkspaceAccess,
     accessMode,
     ...rest
@@ -178,6 +191,7 @@ function buildAgentUpdateData(existing, payload) {
     'openclawSkill',
     'assignedSkills',
     'appointmentSchedulerConfig',
+    'crmPipelineConfig',
     'sharedWorkspaceAccess',
   ].some((key) => Object.prototype.hasOwnProperty.call(payload, key));
   const nextAccessMode = Object.prototype.hasOwnProperty.call(payload, 'accessMode')
@@ -317,6 +331,7 @@ export default async function agentRoute(fastify) {
       openclawSkill,
       assignedSkills,
       appointmentSchedulerConfig,
+      crmPipelineConfig,
       sharedWorkspaceAccess,
       accessMode,
       workspaceId,
@@ -382,6 +397,7 @@ export default async function agentRoute(fastify) {
           systemPrompt,
           assignedSkills: normalizedSkills,
           appointmentSchedulerConfig,
+          crmPipelineConfig,
           sharedWorkspaceAccess: normalizedSharedWorkspaceAccess,
         }) || undefined,
         status: 'INACTIVE',

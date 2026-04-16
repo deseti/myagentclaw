@@ -202,6 +202,7 @@ async function clearSkillAssignments(ownerId, installedSkill) {
     installedSkill?.slug,
   ].filter(Boolean))];
   const removesAppointmentScheduler = candidateKeys.includes(APPOINTMENT_SCHEDULER_SKILL_KEY);
+  const removesCrmPipeline = candidateKeys.includes('crm-pipeline');
 
   if (candidateKeys.length === 0) {
     return [];
@@ -233,6 +234,7 @@ async function clearSkillAssignments(ownerId, installedSkill) {
         configJson: mergeAgentConfig(agent.configJson, {
           assignedSkills: remainingSkills,
           ...(removesAppointmentScheduler ? { appointmentSchedulerConfig: {} } : {}),
+          ...(removesCrmPipeline ? { crmPipelineConfig: {} } : {}),
         }),
       },
     });
