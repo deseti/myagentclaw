@@ -203,6 +203,7 @@ async function clearSkillAssignments(ownerId, installedSkill) {
   ].filter(Boolean))];
   const removesAppointmentScheduler = candidateKeys.includes(APPOINTMENT_SCHEDULER_SKILL_KEY);
   const removesCrmPipeline = candidateKeys.includes('crm-pipeline');
+  const removesBroadcastCampaign = candidateKeys.includes('broadcast-campaign');
 
   if (candidateKeys.length === 0) {
     return [];
@@ -235,6 +236,7 @@ async function clearSkillAssignments(ownerId, installedSkill) {
           assignedSkills: remainingSkills,
           ...(removesAppointmentScheduler ? { appointmentSchedulerConfig: {} } : {}),
           ...(removesCrmPipeline ? { crmPipelineConfig: {} } : {}),
+          ...(removesBroadcastCampaign ? { broadcastCampaignConfig: {} } : {}),
         }),
       },
     });

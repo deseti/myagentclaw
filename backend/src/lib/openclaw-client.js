@@ -86,6 +86,7 @@ export async function ocSendChannelMessage(channelId, channelType, to, text, opt
     body: JSON.stringify({
       channelId,
       channelType,
+      agentId: runtime.agentId || options.agentId || undefined,
       to,
       text,
       replyToId: options.replyToId,

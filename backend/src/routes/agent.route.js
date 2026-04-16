@@ -24,6 +24,9 @@ import {
   APPOINTMENT_SCHEDULER_SKILL_KEY,
 } from '../lib/appointment-scheduler.js';
 import {
+  BROADCAST_CAMPAIGN_SKILL_KEY,
+} from '../lib/broadcast-campaign.js';
+import {
   AI_PROVIDER_DB_VALUE,
   getAiProviderConfig,
 } from '../lib/ai-provider-config.js';
@@ -110,6 +113,24 @@ async function assertRequestedSkillsReady({ ownerId, workspace, skillKeys, reply
   }
 }
 
+function assertSkillAccessModeRestrictions({ skillKeys, accessMode, reply }) {
+  const uniqueSkills = [...new Set((skillKeys || []).filter(Boolean))];
+  const normalizedAccessMode = normalizeAgentAccessMode(accessMode);
+
+  if (
+    uniqueSkills.includes(BROADCAST_CAMPAIGN_SKILL_KEY)
+    && normalizedAccessMode !== 'APPROVAL_REQUIRED'
+  ) {
+    reply.code(403).send({
+      error: 'Forbidden',
+      message: 'Broadcast Campaign hanya boleh dipakai agent dengan access mode Approval Required.',
+    });
+    return false;
+  }
+
+  return true;
+}
+
 const createAgentSchema = z.object({
   name: z.string().min(2).max(100),
   persona: z.string().min(10).max(2000),
@@ -136,6 +157,14 @@ const createAgentSchema = z.object({
     canMoveStage: z.boolean().optional(),
     canAssignLead: z.boolean().optional(),
     canViewAnalytics: z.boolean().optional(),
+  }).optional(),
+  broadcastCampaignConfig: z.object({
+    canUseBroadcast: z.boolean().optional(),
+    canCreateCampaign: z.boolean().optional(),
+    canEditCampaign: z.boolean().optional(),
+    canDeleteCampaign: z.boolean().optional(),
+    canScheduleCampaign: z.boolean().optional(),
+    canViewCampaignAnalytics: z.boolean().optional(),
   }).optional(),
   sharedWorkspaceAccess: z.enum(['none', 'ro', 'rw']).optional(),
   accessMode: z.enum(['OPEN_ACCESS', 'APPROVAL_REQUIRED']).optional(),
@@ -169,6 +198,14 @@ const updateAgentSchema = z.object({
     canAssignLead: z.boolean().optional(),
     canViewAnalytics: z.boolean().optional(),
   }).optional(),
+  broadcastCampaignConfig: z.object({
+    canUseBroadcast: z.boolean().optional(),
+    canCreateCampaign: z.boolean().optional(),
+    canEditCampaign: z.boolean().optional(),
+    canDeleteCampaign: z.boolean().optional(),
+    canScheduleCampaign: z.boolean().optional(),
+    canViewCampaignAnalytics: z.boolean().optional(),
+  }).optional(),
   sharedWorkspaceAccess: z.enum(['none', 'ro', 'rw']).optional(),
   accessMode: z.enum(['OPEN_ACCESS', 'APPROVAL_REQUIRED']).optional(),
 });
@@ -181,6 +218,7 @@ function buildAgentUpdateData(existing, payload) {
     assignedSkills,
     appointmentSchedulerConfig,
     crmPipelineConfig,
+    broadcastCampaignConfig,
     sharedWorkspaceAccess,
     accessMode,
     ...rest
@@ -192,6 +230,7 @@ function buildAgentUpdateData(existing, payload) {
     'assignedSkills',
     'appointmentSchedulerConfig',
     'crmPipelineConfig',
+    'broadcastCampaignConfig',
     'sharedWorkspaceAccess',
   ].some((key) => Object.prototype.hasOwnProperty.call(payload, key));
   const nextAccessMode = Object.prototype.hasOwnProperty.call(payload, 'accessMode')
@@ -332,6 +371,7 @@ export default async function agentRoute(fastify) {
       assignedSkills,
       appointmentSchedulerConfig,
       crmPipelineConfig,
+      broadcastCampaignConfig,
       sharedWorkspaceAccess,
       accessMode,
       workspaceId,
@@ -354,6 +394,14 @@ export default async function agentRoute(fastify) {
       ownerId,
       workspace: ws,
       skillKeys: normalizedSkills,
+      reply,
+    })) {
+      return;
+    }
+
+    if (!assertSkillAccessModeRestrictions({
+      skillKeys: normalizedSkills,
+      accessMode: normalizedAccessMode,
       reply,
     })) {
       return;
@@ -398,6 +446,7 @@ export default async function agentRoute(fastify) {
           assignedSkills: normalizedSkills,
           appointmentSchedulerConfig,
           crmPipelineConfig,
+          broadcastCampaignConfig,
           sharedWorkspaceAccess: normalizedSharedWorkspaceAccess,
         }) || undefined,
         status: 'INACTIVE',
@@ -461,6 +510,21 @@ export default async function agentRoute(fastify) {
       ownerId,
       workspace: existing.workspace,
       skillKeys: requestedSkills(parsed.data),
+      reply,
+    })) {
+      return;
+    }
+
+    const nextSkills = Object.prototype.hasOwnProperty.call(parsed.data, 'assignedSkills')
+      ? normalizeAssignedSkills(parsed.data.assignedSkills)
+      : normalizeAssignedSkills(existing.configJson?.assignedSkills || existing.openclawSkill);
+    const nextAccessMode = Object.prototype.hasOwnProperty.call(parsed.data, 'accessMode')
+      ? parsed.data.accessMode
+      : existing.accessMode;
+
+    if (!assertSkillAccessModeRestrictions({
+      skillKeys: nextSkills,
+      accessMode: nextAccessMode,
       reply,
     })) {
       return;
@@ -544,6 +608,21 @@ export default async function agentRoute(fastify) {
       ownerId,
       workspace: existing.workspace,
       skillKeys: requestedSkills(parsed.data),
+      reply,
+    })) {
+      return;
+    }
+
+    const nextSkills = Object.prototype.hasOwnProperty.call(parsed.data, 'assignedSkills')
+      ? normalizeAssignedSkills(parsed.data.assignedSkills)
+      : normalizeAssignedSkills(existing.configJson?.assignedSkills || existing.openclawSkill);
+    const nextAccessMode = Object.prototype.hasOwnProperty.call(parsed.data, 'accessMode')
+      ? parsed.data.accessMode
+      : existing.accessMode;
+
+    if (!assertSkillAccessModeRestrictions({
+      skillKeys: nextSkills,
+      accessMode: nextAccessMode,
       reply,
     })) {
       return;

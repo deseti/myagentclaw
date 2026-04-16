@@ -1,4 +1,4 @@
-const TIER_ORDER = ['FREE', 'STARTER', 'GROWTH'];
+const TIER_ORDER = ['FREE', 'STARTER', 'GROWTH', 'PRO'];
 
 export const INTERNAL_SKILL_KEYS = {
   PAYMENT_REMINDER: 'payment-reminder',
@@ -30,7 +30,20 @@ export const INTERNAL_SKILL_DEFINITIONS = [
     minimumTier: 'STARTER',
     isComingSoon: false,
   },
-  { key: INTERNAL_SKILL_KEYS.BROADCAST_CAMPAIGN, minimumTier: 'STARTER', isComingSoon: true },
+  {
+    key: INTERNAL_SKILL_KEYS.BROADCAST_CAMPAIGN,
+    displayName: 'Broadcast Campaign',
+    minimumTier: 'STARTER',
+    opensSidebar: true,
+    opensSidebarLabel: 'Broadcast Campaign',
+    enablesWorker: true,
+    workerName: 'broadcast-campaign-worker',
+    dashboardHref: '/dashboard/broadcast-campaign',
+    mainCapability: 'canUseBroadcast',
+    roleUnlocks: ['Campaign Operator'],
+    supportsAnalytics: true,
+    isComingSoon: false,
+  },
   { key: INTERNAL_SKILL_KEYS.ANALYTICS_DASHBOARD, minimumTier: 'GROWTH', isComingSoon: true },
   { key: INTERNAL_SKILL_KEYS.ORDER_TRACKING, minimumTier: 'GROWTH', isComingSoon: true },
   { key: INTERNAL_SKILL_KEYS.POLYMARKET_READ_ONLY, minimumTier: 'GROWTH', isComingSoon: false },
@@ -46,6 +59,8 @@ export function normalizeInternalSkillTier(tier) {
 
   if (normalizedTier === 'FREE') return 'FREE';
   if (normalizedTier === 'STARTER') return 'STARTER';
+  if (normalizedTier === 'GROWTH') return 'GROWTH';
+  if (normalizedTier === 'PRO') return 'PRO';
   return 'GROWTH';
 }
 
@@ -53,7 +68,8 @@ export function formatInternalSkillTierLabel(tier) {
   const normalizedTier = normalizeInternalSkillTier(tier);
   if (normalizedTier === 'FREE') return 'Free';
   if (normalizedTier === 'STARTER') return 'Starter';
-  return 'Growth';
+  if (normalizedTier === 'GROWTH') return 'Growth';
+  return 'Pro';
 }
 
 export function workspaceMeetsMinimumTier(workspaceTier, minimumTier) {

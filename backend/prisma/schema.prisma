@@ -159,6 +159,24 @@ enum CrmPipelineActivityType {
   LEAD_DELETED
 }
 
+enum BroadcastCampaignStatus {
+  DRAFT
+  SCHEDULED
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum BroadcastCampaignRecipientStatus {
+  PENDING
+  QUEUED
+  SENT
+  DELIVERED
+  FAILED
+  SKIPPED
+}
+
 enum SubscriptionStatus {
   ACTIVE
   GRACE
@@ -257,6 +275,7 @@ model Owner {
   workspaces    Workspace[]
   crmPipelineActivitiesAuthored CrmPipelineActivity[] @relation("CrmActivityCreatedByUser")
   crmPipelineNotesAuthored      CrmPipelineNote[]     @relation("CrmNoteCreatedByUser")
+  broadcastCampaignsCreated     BroadcastCampaign[]   @relation("BroadcastCampaignCreatedByUser")
 
   @@map("owners")
 }
@@ -297,6 +316,9 @@ model Workspace {
   crmCustomerPipelineEntries CrmCustomerPipelineEntry[]
   crmPipelineActivities CrmPipelineActivity[]
   crmPipelineNotes CrmPipelineNote[]
+  broadcastCampaigns BroadcastCampaign[]
+  broadcastCampaignAudiences BroadcastCampaignAudience[]
+  broadcastCampaignRecipients BroadcastCampaignRecipient[]
 
   @@map("workspaces")
 }
@@ -507,6 +529,7 @@ model Agent {
   appointmentSchedules AppointmentSchedule[]
   appointmentAvailabilities AppointmentAvailability[]
   crmCustomerPipelineEntriesAssigned CrmCustomerPipelineEntry[]
+  broadcastCampaignsAssigned BroadcastCampaign[]
 
   @@map("agents")
 }
@@ -555,6 +578,7 @@ model Customer {
   workspaceId       String        @map("workspace_id")
   phoneNumber       String        @map("phone_number")
   name              String?
+  tags              String[]      @default([])
   isArchived        Boolean       @default(false) @map("is_archived")
   archivedAt        DateTime?     @map("archived_at")
   isBlocked         Boolean       @default(false) @map("is_blocked")
@@ -572,6 +596,7 @@ model Customer {
   paymentReminders  PaymentReminder[]
   appointmentSchedules AppointmentSchedule[]
   crmPipelineEntries CrmCustomerPipelineEntry[]
+  broadcastCampaignRecipients BroadcastCampaignRecipient[]
 
   @@unique([workspaceId, phoneNumber])
   @@index([workspaceId])
@@ -921,6 +946,96 @@ model CrmPipelineNote {
   @@index([customerPipelineEntryId])
   @@index([workspaceId, customerPipelineEntryId, createdAt])
   @@map("crm_pipeline_notes")
+}
+
+model BroadcastCampaign {
+  id                  String                    @id @default(cuid())
+  workspaceId         String                    @map("workspace_id")
+  createdById         String                    @map("created_by_id")
+  assignedAgentId     String                    @map("assigned_agent_id")
+  title               String
+  description         String?
+  messageTemplate     String                    @map("message_template")
+  channelType         ChannelType               @map("channel_type")
+  status              BroadcastCampaignStatus   @default(DRAFT)
+  scheduledAt         DateTime?                 @map("scheduled_at")
+  startedAt           DateTime?                 @map("started_at")
+  completedAt         DateTime?                 @map("completed_at")
+  cancelledAt         DateTime?                 @map("cancelled_at")
+  audiencePreviewCount Int                      @default(0) @map("audience_preview_count")
+  totalAudience       Int                       @default(0) @map("total_audience")
+  totalSent           Int                       @default(0) @map("total_sent")
+  totalDelivered      Int                       @default(0) @map("total_delivered")
+  totalFailed         Int                       @default(0) @map("total_failed")
+  totalSkipped        Int                       @default(0) @map("total_skipped")
+  lastError           String?                   @map("last_error")
+  createdAt           DateTime                  @default(now()) @map("created_at")
+  updatedAt           DateTime                  @updatedAt @map("updated_at")
+
+  workspace           Workspace                 @relation(fields: [workspaceId], references: [id])
+  createdBy           Owner                     @relation("BroadcastCampaignCreatedByUser", fields: [createdById], references: [id])
+  assignedAgent       Agent                     @relation(fields: [assignedAgentId], references: [id])
+  audiences           BroadcastCampaignAudience[]
+  recipients          BroadcastCampaignRecipient[]
+
+  @@index([workspaceId])
+  @@index([workspaceId, status])
+  @@index([workspaceId, scheduledAt])
+  @@index([workspaceId, assignedAgentId])
+  @@index([workspaceId, channelType])
+  @@map("broadcast_campaigns")
+}
+
+model BroadcastCampaignAudience {
+  id          String             @id @default(cuid())
+  workspaceId String             @map("workspace_id")
+  campaignId  String             @map("campaign_id")
+  filterType  String             @map("filter_type")
+  includeMode String             @default("INCLUDE") @map("include_mode")
+  operator    String?
+  position    Int                @default(0)
+  valueJson   Json?              @map("value_json")
+  createdAt   DateTime           @default(now()) @map("created_at")
+  updatedAt   DateTime           @updatedAt @map("updated_at")
+
+  workspace   Workspace          @relation(fields: [workspaceId], references: [id])
+  campaign    BroadcastCampaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+  @@index([campaignId])
+  @@index([workspaceId, campaignId, position])
+  @@map("broadcast_campaign_audiences")
+}
+
+model BroadcastCampaignRecipient {
+  id              String                           @id @default(cuid())
+  workspaceId     String                           @map("workspace_id")
+  campaignId      String                           @map("campaign_id")
+  customerId      String                           @map("customer_id")
+  channelSessionId String?                         @map("channel_session_id")
+  recipientStatus BroadcastCampaignRecipientStatus @default(PENDING) @map("recipient_status")
+  sentAt          DateTime?                        @map("sent_at")
+  deliveredAt     DateTime?                        @map("delivered_at")
+  failedAt        DateTime?                        @map("failed_at")
+  skippedAt       DateTime?                        @map("skipped_at")
+  lastAttemptAt   DateTime?                        @map("last_attempt_at")
+  attemptCount    Int                              @default(0) @map("attempt_count")
+  errorMessage    String?                          @map("error_message")
+  metadataJson    Json?                            @map("metadata_json")
+  createdAt       DateTime                         @default(now()) @map("created_at")
+  updatedAt       DateTime                         @updatedAt @map("updated_at")
+
+  workspace       Workspace                        @relation(fields: [workspaceId], references: [id])
+  campaign        BroadcastCampaign                @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  customer        Customer                         @relation(fields: [customerId], references: [id])
+
+  @@unique([campaignId, customerId])
+  @@index([workspaceId])
+  @@index([campaignId])
+  @@index([customerId])
+  @@index([workspaceId, campaignId, recipientStatus])
+  @@index([channelSessionId])
+  @@map("broadcast_campaign_recipients")
 }
 
 // ─────────────────────────────────────────────

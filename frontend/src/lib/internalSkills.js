@@ -1,4 +1,4 @@
-const TIER_ORDER = ['FREE', 'STARTER', 'GROWTH'];
+const TIER_ORDER = ['FREE', 'STARTER', 'GROWTH', 'PRO'];
 
 export const INTERNAL_SKILL_KEYS = {
   PAYMENT_REMINDER: 'payment-reminder',
@@ -85,17 +85,31 @@ export const INTERNAL_SKILL_DEFINITIONS = [
     displayName: 'Broadcast Campaign',
     category: 'Campaign Ops',
     minimumTier: 'STARTER',
-    shortDescription: 'Kampanye broadcast internal untuk pesan massal dan segmentasi audiens.',
-    fullDescription: 'Placeholder internal skill untuk broadcast campaign, segmentasi kontak, dan orkestrasi pesan massal yang akan hadir di tier Starter.',
+    shortDescription: 'Composer broadcast internal untuk segmentasi audiens, penjadwalan kirim, dan delivery analytics per workspace.',
+    fullDescription: 'Built-in Starter capability untuk menyiapkan campaign broadcast per workspace, membangun filter audience, menugaskan agent pengirim, dan memantau delivery log. Sidebar, dashboard, worker, usage tracking, dan analytics baru aktif setelah skill ini dipakai minimal satu agent Approval Required.',
     unlocks: [
-      'Composer campaign dengan segmentasi audiens internal',
-      'Ringkasan audience dan performa kirim',
-      'Workflow broadcast saat fitur resmi dirilis',
+      'Broadcast Campaign sidebar dan dashboard workspace',
+      'Audience builder, delivery log, usage tracking, dan analytics campaign',
+      'Broadcast worker untuk scheduled send dan retry recipient gagal',
     ],
-    roleUnlocks: [],
-    opensSidebar: false,
-    enablesWorker: false,
-    isComingSoon: true,
+    roleUnlocks: ['Campaign Operator'],
+    opensSidebar: true,
+    opensSidebarLabel: 'Broadcast Campaign',
+    enablesWorker: true,
+    workerName: 'broadcast-campaign-worker',
+    dashboardHref: '/dashboard/broadcast-campaign',
+    mainCapability: 'canUseBroadcast',
+    capabilityList: [
+      'canUseBroadcast',
+      'canCreateCampaign',
+      'canEditCampaign',
+      'canDeleteCampaign',
+      'canScheduleCampaign',
+      'canViewCampaignAnalytics',
+    ],
+    advancedAnalyticsTier: 'PRO',
+    supportsAnalytics: true,
+    isComingSoon: false,
     searchTerms: ['broadcast', 'campaign', 'audience', 'messaging'],
   },
   {
@@ -186,6 +200,8 @@ function normalizeTier(tier) {
 
   if (normalizedTier === 'FREE') return 'FREE';
   if (normalizedTier === 'STARTER') return 'STARTER';
+  if (normalizedTier === 'GROWTH') return 'GROWTH';
+  if (normalizedTier === 'PRO') return 'PRO';
   return 'GROWTH';
 }
 
@@ -193,7 +209,8 @@ export function formatSkillTierLabel(tier) {
   const normalizedTier = normalizeTier(tier);
   if (normalizedTier === 'FREE') return 'Free';
   if (normalizedTier === 'STARTER') return 'Starter';
-  return 'Growth';
+  if (normalizedTier === 'GROWTH') return 'Growth';
+  return 'Pro';
 }
 
 export function formatSkillRequirementLabel(tier) {

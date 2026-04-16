@@ -800,6 +800,7 @@ function buildToolPolicyForTier(tier) {
   if (tier === 'STARTER') {
     return {
       profile: 'coding',
+      alsoAllow: ['message'],
       deny: ['exec', 'process', 'sessions_spawn', 'subagents', 'code_execution'],
       fs: { workspaceOnly: true },
     };
@@ -807,6 +808,7 @@ function buildToolPolicyForTier(tier) {
 
   return {
     profile: 'coding',
+    alsoAllow: ['message'],
     fs: { workspaceOnly: true },
     exec: {
       timeoutSec: tier === 'GROWTH' || tier === 'PRO' ? 300 : 120,
@@ -2924,12 +2926,60 @@ async function startAdapterApi() {
   });
 
   api.post('/messages/send', async (req, reply) => {
-    const { channelId, channelType, to, text, replyToId, threadId } = req.body || {};
+    const { channelId, channelType, agentId: requestAgentId, to, text, replyToId, threadId } = req.body || {};
     const normalizedType = normalizeChannelType(channelType);
     const channelKey = getChannelKey(normalizedType);
+    const toolName = 'message';
     if (!channelId || !to || !text) {
       return reply.code(400).send({ error: 'channelId, to, dan text diperlukan' });
     }
+
+    // Resolve agentId from request or from channel registration store
+    let agentId = requestAgentId;
+    if (!agentId) {
+      const registrations = listChannelRegistrations();
+      const reg = registrations.find((r) => String(r.channelId) === String(channelId));
+      agentId = reg?.agentId || null;
+    }
+
+    // Build session key for the gateway tools/invoke endpoint
+    // OpenClaw gateway registers tools per agent session: "agent:<agentId>:main"
+    const sessionKey = agentId ? `agent:${agentId}:main` : 'main';
+    const runtimeConfig = readConfig();
+    const agentRuntimeConfig = Array.isArray(runtimeConfig?.agents?.list)
+      ? runtimeConfig.agents.list.find((entry) => String(entry?.id || '') === String(agentId || '')) || null
+      : null;
+    const gatewayPayload = {
+      tool: toolName,
+      action: 'send',
+      sessionKey,
+      args: {
+        channel: channelKey,
+        target: normalizeSendTarget(normalizedType, to),
+        accountId: channelId,
+        message: text,
+        ...(replyToId ? { replyTo: String(replyToId) } : {}),
+        ...(threadId ? { threadId: String(threadId) } : {}),
+      },
+    };
+
+    console.log('[gateway-manager] messages/send:resolving', {
+      channelId: String(channelId),
+      channelType: normalizedType,
+      agentId: agentId || '(not found)',
+      sessionKey,
+      toolName,
+      to: String(to).slice(0, 20),
+      textLength: String(text).length,
+      payloadPreview: {
+        channel: gatewayPayload.args.channel,
+        target: gatewayPayload.args.target,
+        accountId: gatewayPayload.args.accountId,
+        hasReplyTo: Boolean(gatewayPayload.args.replyTo),
+        hasThreadId: Boolean(gatewayPayload.args.threadId),
+      },
+      agentTools: agentRuntimeConfig?.tools || null,
+    });
 
     try {
       const result = await gatewayFetch('/tools/invoke', {
@@ -2937,25 +2987,31 @@ async function startAdapterApi() {
         headers: {
           'x-openclaw-message-channel': channelKey,
           'x-openclaw-account-id': String(channelId),
+          'x-session-key': sessionKey,
         },
-        body: {
-          tool: 'message',
-          action: 'send',
-          sessionKey: 'main',
-          args: {
-            channel: channelKey,
-            target: normalizeSendTarget(normalizedType, to),
-            accountId: channelId,
-            message: text,
-            ...(replyToId ? { replyTo: String(replyToId) } : {}),
-            ...(threadId ? { threadId: String(threadId) } : {}),
-          },
-        },
+        body: gatewayPayload,
       });
 
+      console.log('[gateway-manager] messages/send:ok', { channelId: String(channelId), sessionKey, toolName, result });
       return { ok: true, result };
     } catch (err) {
-      console.error('[gateway-manager] messages/send error:', err);
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      const missingTool = errorMessage.includes('Tool not available');
+      console.error('[gateway-manager] messages/send error:', {
+        toolName,
+        channelId: String(channelId),
+        channelType: normalizedType,
+        agentId: agentId || null,
+        sessionKey,
+        payloadPreview: {
+          channel: gatewayPayload.args.channel,
+          target: gatewayPayload.args.target,
+          accountId: gatewayPayload.args.accountId,
+        },
+        missingTool,
+        agentTools: agentRuntimeConfig?.tools || null,
+        error: errorMessage,
+      });
       return reply.code(500).send({ error: err.message });
     }
   });

@@ -83,6 +83,15 @@ const CRM_PIPELINE_DEFAULT_CONFIG = {
   canViewAnalytics: true,
 };
 
+const BROADCAST_CAMPAIGN_DEFAULT_CONFIG = {
+  canUseBroadcast: true,
+  canCreateCampaign: true,
+  canEditCampaign: true,
+  canDeleteCampaign: true,
+  canScheduleCampaign: true,
+  canViewCampaignAnalytics: true,
+};
+
 const WEEKDAY_OPTIONS = [
   { value: 1, label: 'Mon' },
   { value: 2, label: 'Tue' },
@@ -119,6 +128,14 @@ const agentSchema = z.object({
     canMoveStage: z.boolean().optional(),
     canAssignLead: z.boolean().optional(),
     canViewAnalytics: z.boolean().optional(),
+  }).optional(),
+  broadcastCampaignConfig: z.object({
+    canUseBroadcast: z.boolean().optional(),
+    canCreateCampaign: z.boolean().optional(),
+    canEditCampaign: z.boolean().optional(),
+    canDeleteCampaign: z.boolean().optional(),
+    canScheduleCampaign: z.boolean().optional(),
+    canViewCampaignAnalytics: z.boolean().optional(),
   }).optional(),
   systemPrompt: z.string().max(12000, 'System prompt maksimal 12000 karakter').optional(),
   sharedWorkspaceAccess: z.enum(['none', 'ro', 'rw']).optional(),
@@ -199,6 +216,28 @@ function readAgentCrmPipelineConfig(agent) {
     agent?.configJson?.skillConfigs?.[INTERNAL_SKILL_KEYS.CRM_PIPELINE]
       || agent?.configJson?.crmPipelineConfig
       || agent?.configJson?.crmPipeline
+      || {},
+  );
+}
+
+function normalizeBroadcastCampaignConfig(value) {
+  const raw = value && typeof value === 'object' ? value : {};
+
+  return {
+    canUseBroadcast: raw.canUseBroadcast ?? BROADCAST_CAMPAIGN_DEFAULT_CONFIG.canUseBroadcast,
+    canCreateCampaign: raw.canCreateCampaign ?? BROADCAST_CAMPAIGN_DEFAULT_CONFIG.canCreateCampaign,
+    canEditCampaign: raw.canEditCampaign ?? BROADCAST_CAMPAIGN_DEFAULT_CONFIG.canEditCampaign,
+    canDeleteCampaign: raw.canDeleteCampaign ?? BROADCAST_CAMPAIGN_DEFAULT_CONFIG.canDeleteCampaign,
+    canScheduleCampaign: raw.canScheduleCampaign ?? BROADCAST_CAMPAIGN_DEFAULT_CONFIG.canScheduleCampaign,
+    canViewCampaignAnalytics: raw.canViewCampaignAnalytics ?? BROADCAST_CAMPAIGN_DEFAULT_CONFIG.canViewCampaignAnalytics,
+  };
+}
+
+function readAgentBroadcastCampaignConfig(agent) {
+  return normalizeBroadcastCampaignConfig(
+    agent?.configJson?.skillConfigs?.[INTERNAL_SKILL_KEYS.BROADCAST_CAMPAIGN]
+      || agent?.configJson?.broadcastCampaignConfig
+      || agent?.configJson?.broadcastCampaign
       || {},
   );
 }
@@ -292,6 +331,7 @@ export default function AgentFormPage() {
       assignedSkills: [],
       appointmentSchedulerConfig: APPOINTMENT_SCHEDULER_DEFAULT_CONFIG,
       crmPipelineConfig: CRM_PIPELINE_DEFAULT_CONFIG,
+      broadcastCampaignConfig: BROADCAST_CAMPAIGN_DEFAULT_CONFIG,
       systemPrompt: '',
       sharedWorkspaceAccess: 'none',
       accessMode: 'OPEN_ACCESS',
@@ -304,6 +344,8 @@ export default function AgentFormPage() {
   const appointmentSchedulerConfig = normalizeAppointmentSchedulerConfig(watchAll.appointmentSchedulerConfig);
   const crmPipelineSelected = selectedSkills.includes(INTERNAL_SKILL_KEYS.CRM_PIPELINE);
   const crmPipelineConfig = normalizeCrmPipelineConfig(watchAll.crmPipelineConfig);
+  const broadcastCampaignSelected = selectedSkills.includes(INTERNAL_SKILL_KEYS.BROADCAST_CAMPAIGN);
+  const broadcastCampaignConfig = normalizeBroadcastCampaignConfig(watchAll.broadcastCampaignConfig);
   const availableAdvancedRoles = getAvailableAdvancedRolePresets(installedSkills, selectedSkills);
   const selectedRolePreset = getRolePresetByKey(selectedRoleKey) || getRolePresetByRoleName(watchAll.role) || DEFAULT_ROLE_PRESET;
   const selectedAccessMode = watchAll.accessMode || 'OPEN_ACCESS';
@@ -348,6 +390,7 @@ export default function AgentFormPage() {
             assignedSkills,
             appointmentSchedulerConfig: readAgentAppointmentSchedulerConfig(agent),
             crmPipelineConfig: readAgentCrmPipelineConfig(agent),
+            broadcastCampaignConfig: readAgentBroadcastCampaignConfig(agent),
             systemPrompt: agent.configJson?.systemPrompt || '',
             sharedWorkspaceAccess: currentTier === 'FREE'
               ? 'none'
@@ -383,6 +426,9 @@ export default function AgentFormPage() {
         crmPipelineConfig: workspaceTier === 'FREE' || !normalizeAssignedSkills(data.assignedSkills).includes(INTERNAL_SKILL_KEYS.CRM_PIPELINE)
           ? undefined
           : normalizeCrmPipelineConfig(data.crmPipelineConfig),
+        broadcastCampaignConfig: workspaceTier === 'FREE' || !normalizeAssignedSkills(data.assignedSkills).includes(INTERNAL_SKILL_KEYS.BROADCAST_CAMPAIGN)
+          ? undefined
+          : normalizeBroadcastCampaignConfig(data.broadcastCampaignConfig),
         systemPrompt: data.systemPrompt || '',
         sharedWorkspaceAccess: workspaceTier === 'FREE'
           ? 'none'
@@ -409,6 +455,10 @@ export default function AgentFormPage() {
       : [...selectedSkills, skillKey];
 
     setValue('assignedSkills', nextSkills, { shouldDirty: true, shouldValidate: true });
+
+    if (skillKey === INTERNAL_SKILL_KEYS.BROADCAST_CAMPAIGN && !selectedSkills.includes(skillKey)) {
+      setValue('accessMode', 'APPROVAL_REQUIRED', { shouldDirty: true, shouldValidate: true });
+    }
   };
 
   const toggleAppointmentWorkingDay = (dayValue) => {
@@ -425,6 +475,10 @@ export default function AgentFormPage() {
 
   const setCrmPipelineField = (field, value) => {
     setValue(`crmPipelineConfig.${field}`, value, { shouldDirty: true, shouldValidate: true });
+  };
+
+  const setBroadcastCampaignField = (field, value) => {
+    setValue(`broadcastCampaignConfig.${field}`, value, { shouldDirty: true, shouldValidate: true });
   };
 
   const applyRolePreset = (preset) => {
@@ -646,6 +700,11 @@ export default function AgentFormPage() {
                                 Unlocks Lead Qualification role, CRM Pipeline dashboard, dan capability agent untuk manage pipeline, move stage, assign lead, serta view analytics.
                               </p>
                             )}
+                            {skill.skillKey === INTERNAL_SKILL_KEYS.BROADCAST_CAMPAIGN && (
+                              <p className="mt-2 text-[11px] text-sky-300">
+                                Unlocks Campaign Operator role, Broadcast Campaign dashboard, scheduled send worker, dan capability agent untuk create, edit, delete, schedule, serta view analytics campaign. Skill ini hanya valid untuk agent Approval Required.
+                              </p>
+                            )}
                           </div>
                         </label>
                       );
@@ -814,6 +873,61 @@ export default function AgentFormPage() {
                       </p>
                       <p className="text-xs text-slate-400">
                         Nilai ini dikirim ke runtime agent melalui skill config map sehingga capability CRM hilang otomatis saat skill dilepas atau diuninstall.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {broadcastCampaignSelected && (
+                  <div className="rounded-xl border border-fuchsia-500/30 bg-fuchsia-500/10 p-4 space-y-4">
+                    <div className="space-y-1">
+                      <Label>Broadcast Campaign Capability</Label>
+                      <p className="text-xs text-fuchsia-100/80">
+                        Konfigurasi ini menentukan apakah agent boleh memakai Broadcast Campaign, membuat campaign baru, mengedit, menghapus, menjadwalkan, dan melihat analytics campaign.
+                      </p>
+                    </div>
+
+                    <div className="rounded-xl border border-slate-700 bg-slate-950/70 p-4 space-y-2">
+                      <p className="text-xs uppercase tracking-[0.24em] text-slate-500">Access Restriction</p>
+                      <p className="text-sm text-slate-200">
+                        Broadcast Campaign hanya boleh dipakai agent dengan access mode Approval Required.
+                      </p>
+                      <p className="text-xs text-slate-400">
+                        Saat skill ini dipilih, backend akan menolak penyimpanan jika access mode diubah ke Open Access.
+                      </p>
+                    </div>
+
+                    <div className="grid gap-3 md:grid-cols-2">
+                      {[
+                        ['canUseBroadcast', 'Can Use Broadcast'],
+                        ['canCreateCampaign', 'Can Create Campaign'],
+                        ['canEditCampaign', 'Can Edit Campaign'],
+                        ['canDeleteCampaign', 'Can Delete Campaign'],
+                        ['canScheduleCampaign', 'Can Schedule Campaign'],
+                        ['canViewCampaignAnalytics', 'Can View Campaign Analytics'],
+                      ].map(([field, label]) => (
+                        <label key={field} className="flex items-center justify-between rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2 text-sm text-slate-200">
+                          <span>{label}</span>
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4 rounded border-slate-600 bg-slate-950"
+                            checked={Boolean(broadcastCampaignConfig[field])}
+                            onChange={(event) => setBroadcastCampaignField(field, event.target.checked)}
+                          />
+                        </label>
+                      ))}
+                    </div>
+
+                    <div className="rounded-xl border border-slate-700 bg-slate-950/70 p-4 space-y-2">
+                      <p className="text-xs uppercase tracking-[0.24em] text-slate-500">Capability Summary</p>
+                      <p className="text-sm text-slate-200">
+                        {Object.entries(broadcastCampaignConfig)
+                          .filter(([, enabled]) => Boolean(enabled))
+                          .map(([field]) => field)
+                          .join(', ') || 'Belum ada capability Broadcast yang aktif.'}
+                      </p>
+                      <p className="text-xs text-slate-400">
+                        Nilai ini dikirim ke runtime agent melalui skill config map dan ikut terhapus otomatis saat skill Broadcast dilepas atau diuninstall.
                       </p>
                     </div>
                   </div>

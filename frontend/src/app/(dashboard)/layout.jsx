@@ -23,6 +23,7 @@ const POLYMARKET_MINIMUM_TIER = getInternalSkillDefinition(INTERNAL_SKILL_KEYS.P
 const PAYMENT_REMINDER_MINIMUM_TIER = getInternalSkillDefinition(INTERNAL_SKILL_KEYS.PAYMENT_REMINDER)?.minimumTier || 'STARTER';
 const APPOINTMENT_SCHEDULER_MINIMUM_TIER = getInternalSkillDefinition(INTERNAL_SKILL_KEYS.APPOINTMENT_SCHEDULER)?.minimumTier || 'STARTER';
 const CRM_PIPELINE_MINIMUM_TIER = getInternalSkillDefinition(INTERNAL_SKILL_KEYS.CRM_PIPELINE)?.minimumTier || 'STARTER';
+const BROADCAST_CAMPAIGN_MINIMUM_TIER = getInternalSkillDefinition(INTERNAL_SKILL_KEYS.BROADCAST_CAMPAIGN)?.minimumTier || 'STARTER';
 
 const NAV_ITEMS = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -33,6 +34,7 @@ const NAV_ITEMS = [
   { href: '/dashboard/payment-reminder', label: 'Payment Reminder', icon: Wallet },
   { href: '/dashboard/appointment-scheduler', label: 'Appointment Scheduler', icon: CalendarDays },
   { href: '/dashboard/crm-pipeline', label: 'CRM Pipeline', icon: GitBranch },
+  { href: '/dashboard/broadcast-campaign', label: 'Broadcast Campaign', icon: Bot },
   { href: '/dashboard/knowledge', label: 'Knowledge Base', icon: BookOpen },
   { href: '/dashboard/conversations', label: 'Percakapan', icon: Inbox, badge: 'needsAdmin' },
   { href: '/dashboard/customers', label: 'Customer', icon: Users },
@@ -113,6 +115,7 @@ export default function DashboardLayout({ children }) {
   const [hasActivePaymentReminderSkill, setHasActivePaymentReminderSkill] = useState(false);
   const [hasActiveAppointmentSchedulerSkill, setHasActiveAppointmentSchedulerSkill] = useState(false);
   const [hasActiveCrmPipelineSkill, setHasActiveCrmPipelineSkill] = useState(false);
+  const [hasActiveBroadcastCampaignSkill, setHasActiveBroadcastCampaignSkill] = useState(false);
 
   const handleLogout = () => logout();
   const navItems = NAV_ITEMS.filter((item) => {
@@ -122,6 +125,7 @@ export default function DashboardLayout({ children }) {
       || item.href === '/dashboard/payment-reminder'
       || item.href === '/dashboard/appointment-scheduler'
       || item.href === '/dashboard/crm-pipeline'
+      || item.href === '/dashboard/broadcast-campaign'
     )) {
       return false;
     }
@@ -139,6 +143,10 @@ export default function DashboardLayout({ children }) {
     }
 
     if (item.href === '/dashboard/crm-pipeline' && !hasActiveCrmPipelineSkill) {
+      return false;
+    }
+
+    if (item.href === '/dashboard/broadcast-campaign' && !hasActiveBroadcastCampaignSkill) {
       return false;
     }
 
@@ -187,6 +195,7 @@ export default function DashboardLayout({ children }) {
           const paymentReminderEligible = canAccessInternalSkill(nextTier, PAYMENT_REMINDER_MINIMUM_TIER);
           const appointmentSchedulerEligible = canAccessInternalSkill(nextTier, APPOINTMENT_SCHEDULER_MINIMUM_TIER);
           const crmPipelineEligible = canAccessInternalSkill(nextTier, CRM_PIPELINE_MINIMUM_TIER);
+          const broadcastCampaignEligible = canAccessInternalSkill(nextTier, BROADCAST_CAMPAIGN_MINIMUM_TIER);
           setWorkspaceTier(nextTier);
 
           if (nextTier === 'FREE') {
@@ -194,6 +203,7 @@ export default function DashboardLayout({ children }) {
             setHasActivePaymentReminderSkill(false);
             setHasActiveAppointmentSchedulerSkill(false);
             setHasActiveCrmPipelineSkill(false);
+            setHasActiveBroadcastCampaignSkill(false);
             if (pathname.startsWith('/dashboard/payment-reminder')) {
               router.replace('/dashboard/skills');
             }
@@ -201,6 +211,9 @@ export default function DashboardLayout({ children }) {
               router.replace('/dashboard/skills');
             }
             if (pathname.startsWith('/dashboard/crm-pipeline')) {
+              router.replace('/dashboard/skills');
+            }
+            if (pathname.startsWith('/dashboard/broadcast-campaign')) {
               router.replace('/dashboard/skills');
             }
             return;
@@ -234,6 +247,13 @@ export default function DashboardLayout({ children }) {
             }
           }
 
+          if (!broadcastCampaignEligible) {
+            setHasActiveBroadcastCampaignSkill(false);
+            if (pathname.startsWith('/dashboard/broadcast-campaign')) {
+              router.replace('/dashboard/skills');
+            }
+          }
+
           try {
             const { data: skillsData } = await api.get('/skills/installed');
             if (cancelled) return;
@@ -243,14 +263,17 @@ export default function DashboardLayout({ children }) {
             const paymentReminderSkill = getInstalledInternalSkill(installedSkills, INTERNAL_SKILL_KEYS.PAYMENT_REMINDER);
             const appointmentSchedulerSkill = getInstalledInternalSkill(installedSkills, INTERNAL_SKILL_KEYS.APPOINTMENT_SCHEDULER);
             const crmPipelineSkill = getInstalledInternalSkill(installedSkills, INTERNAL_SKILL_KEYS.CRM_PIPELINE);
+            const broadcastCampaignSkill = getInstalledInternalSkill(installedSkills, INTERNAL_SKILL_KEYS.BROADCAST_CAMPAIGN);
             const polymarketActive = isInternalSkillActive(polymarketSkill);
             const paymentReminderActive = paymentReminderEligible && isInternalSkillActive(paymentReminderSkill);
             const appointmentSchedulerActive = appointmentSchedulerEligible && isInternalSkillActive(appointmentSchedulerSkill);
             const crmPipelineActive = crmPipelineEligible && isInternalSkillActive(crmPipelineSkill);
+            const broadcastCampaignActive = broadcastCampaignEligible && isInternalSkillActive(broadcastCampaignSkill);
             setHasActivePolymarketSkill(polymarketActive);
             setHasActivePaymentReminderSkill(paymentReminderActive);
             setHasActiveAppointmentSchedulerSkill(appointmentSchedulerActive);
             setHasActiveCrmPipelineSkill(crmPipelineActive);
+            setHasActiveBroadcastCampaignSkill(broadcastCampaignActive);
 
             if (!polymarketActive && pathname.startsWith('/dashboard/polymarket')) {
               router.replace('/dashboard/skills');
@@ -267,12 +290,17 @@ export default function DashboardLayout({ children }) {
             if (!crmPipelineActive && pathname.startsWith('/dashboard/crm-pipeline')) {
               router.replace('/dashboard/skills');
             }
+
+            if (!broadcastCampaignActive && pathname.startsWith('/dashboard/broadcast-campaign')) {
+              router.replace('/dashboard/skills');
+            }
           } catch {
             if (!cancelled) {
               setHasActivePolymarketSkill(false);
               setHasActivePaymentReminderSkill(false);
               setHasActiveAppointmentSchedulerSkill(false);
               setHasActiveCrmPipelineSkill(false);
+              setHasActiveBroadcastCampaignSkill(false);
               if (pathname.startsWith('/dashboard/polymarket')) {
                 router.replace('/dashboard/skills');
               }
@@ -283,6 +311,9 @@ export default function DashboardLayout({ children }) {
                 router.replace('/dashboard/skills');
               }
               if (pathname.startsWith('/dashboard/crm-pipeline')) {
+                router.replace('/dashboard/skills');
+              }
+              if (pathname.startsWith('/dashboard/broadcast-campaign')) {
                 router.replace('/dashboard/skills');
               }
             }
@@ -296,6 +327,7 @@ export default function DashboardLayout({ children }) {
           setHasActivePaymentReminderSkill(false);
           setHasActiveAppointmentSchedulerSkill(false);
           setHasActiveCrmPipelineSkill(false);
+          setHasActiveBroadcastCampaignSkill(false);
         }
       });
 

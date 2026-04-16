@@ -73,6 +73,7 @@ await fastify.register(async (app) => {
   const { default: appointmentRoute } = await import('./routes/appointments.route.js');
   const { default: paymentReminderRoute } = await import('./routes/payment-reminders.route.js');
   const { default: crmRoute } = await import('./routes/crm.route.js');
+  const { default: broadcastCampaignRoute } = await import('./routes/broadcast-campaign.route.js');
   const { default: polymarketRoute } = await import('./routes/polymarket.route.js');
   const { default: polymarketAutopilotRoute } = await import('./routes/polymarket-autopilot.route.js');
   const { default: skillsRoute } = await import('./routes/skills.route.js');
@@ -88,6 +89,7 @@ await fastify.register(async (app) => {
   app.register(appointmentRoute, { prefix: '/appointments' });
   app.register(paymentReminderRoute, { prefix: '/payment-reminders' });
   app.register(crmRoute, { prefix: '/crm' });
+  app.register(broadcastCampaignRoute, { prefix: '/broadcast-campaigns' });
   app.register(polymarketRoute, { prefix: '/polymarket' });
   app.register(polymarketAutopilotRoute, { prefix: '/polymarket/autopilot' });
   app.register(skillsRoute, { prefix: '/skills' });
@@ -251,6 +253,7 @@ try {
   import('./queues/appointment-reminder.worker.js').catch((err) => fastify.log.warn(err, 'appointment-reminder-worker init failed'));
   import('./queues/crm-automation.worker.js').catch((err) => fastify.log.warn(err, 'crm-automation-worker init failed'));
   import('./queues/polymarket-autopilot.worker.js').catch((err) => fastify.log.warn(err, 'polymarket-autopilot-worker init failed'));
+  import('./queues/broadcast-campaign.worker.js').catch((err) => fastify.log.warn(err, 'broadcast-campaign-worker init failed'));
 } catch (err) {
   fastify.log.error(err, 'Failed to start server');
   await prisma.$disconnect();

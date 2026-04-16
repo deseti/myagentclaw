@@ -56,6 +56,7 @@ export async function listAgentsUsingSkill(workspaceId, requiredSkillKey) {
       id: true,
       name: true,
       status: true,
+      accessMode: true,
       openclawSkill: true,
       configJson: true,
     },
