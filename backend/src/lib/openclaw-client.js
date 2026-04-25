@@ -10,9 +10,20 @@
 
 const ADAPTER_URL = process.env.OPENCLAW_ADAPTER_URL || process.env.OPENCLAW_BASE_URL || 'http://openclaw-adapter:4000';
 const ADAPTER_WHATSAPP_LINK_BASE = '/api/myagentclaw/whatsapp/link';
+const ADAPTER_CONTROL_TOKEN = String(process.env.OPENCLAW_ADAPTER_CONTROL_TOKEN || '').trim();
 
 function resolveAdapterBaseUrl(runtime = {}) {
   return runtime?.adapterUrl || ADAPTER_URL;
+}
+
+function buildAdapterControlHeaders(runtime = {}, headers = {}) {
+  const controlToken = String(runtime?.adapterControlToken || ADAPTER_CONTROL_TOKEN || '').trim();
+  return controlToken
+    ? {
+        Authorization: `Bearer ${controlToken}`,
+        ...headers,
+      }
+    : headers;
 }
 
 async function adapterFetch(path, options = {}, runtime = {}) {
@@ -20,7 +31,10 @@ async function adapterFetch(path, options = {}, runtime = {}) {
   const url = `${resolveAdapterBaseUrl(runtime)}${path}`;
   const res = await fetch(url, {
     ...options,
-    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+    headers: buildAdapterControlHeaders(runtime, {
+      'Content-Type': 'application/json',
+      ...(options.headers || {}),
+    }),
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) {

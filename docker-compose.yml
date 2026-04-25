@@ -35,6 +35,7 @@ services:
     image: adminer:4.8.1-standalone
     container_name: myagentclaw_adminer
     restart: unless-stopped
+    profiles: ["debug"]
     environment:
       ADMINER_DEFAULT_SERVER: postgres
       ADMINER_DESIGN: pepa-linha
@@ -81,6 +82,7 @@ services:
       OPENAI_MAX_TOKENS: ${OPENAI_MAX_TOKENS:-}
       OPENAI_STREAM: ${OPENAI_STREAM:-true}
       OPENAI_REASONING: ${OPENAI_REASONING:-none}
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN}
       INTERNAL_SECRET_KEY: ${INTERNAL_SECRET_KEY}
       BACKEND_INTERNAL_URL: http://backend:3001
     volumes:
@@ -118,10 +120,13 @@ services:
       OPENAI_MAX_TOKENS: ${OPENAI_MAX_TOKENS:-}
       OPENAI_STREAM: ${OPENAI_STREAM:-true}
       OPENAI_REASONING: ${OPENAI_REASONING:-none}
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN}
+      OPENCLAW_ADAPTER_CONTROL_TOKEN: ${OPENCLAW_ADAPTER_CONTROL_TOKEN}
       ADAPTER_PORT: 4000
       OPENCLAW_GATEWAY_PORT: 18789
       INTERNAL_SECRET_KEY: ${INTERNAL_SECRET_KEY}
       BACKEND_INTERNAL_URL: http://backend:3001
+      MYAGENTCLAW_ADAPTER_PUBLIC_URL: http://openclaw-adapter:4000
     volumes:
       - openclaw_data:/home/node/.openclaw
     networks: [myagentclaw_net]
@@ -134,7 +139,11 @@ services:
     container_name: myagentclaw_backend
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
       REDIS_URL: redis://redis:6379
       JWT_SECRET: ${JWT_SECRET}
       INTERNAL_SECRET_KEY: ${INTERNAL_SECRET_KEY}
@@ -142,7 +151,10 @@ services:
       POLYMARKET_AUTOPILOT_LIVE_EXECUTION_ENABLED: ${POLYMARKET_AUTOPILOT_LIVE_EXECUTION_ENABLED:-true}
       OPENCLAW_BASE_URL: http://openclaw-adapter:4000
       OPENCLAW_ADAPTER_URL: http://openclaw-adapter:4000
+      OPENCLAW_ADAPTER_CONTROL_TOKEN: ${OPENCLAW_ADAPTER_CONTROL_TOKEN}
       OPENCLAW_GATEWAY_URL: http://openclaw:18789
+      MYAGENTCLAW_DEDICATED_GATEWAY_TOKEN_SECRET: ${MYAGENTCLAW_DEDICATED_GATEWAY_TOKEN_SECRET}
+      MYAGENTCLAW_DEDICATED_ADAPTER_CONTROL_TOKEN_SECRET: ${MYAGENTCLAW_DEDICATED_ADAPTER_CONTROL_TOKEN_SECRET}
       XENDIT_SECRET_KEY: ${XENDIT_SECRET_KEY}
       XENDIT_WEBHOOK_TOKEN: ${XENDIT_WEBHOOK_TOKEN}
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}

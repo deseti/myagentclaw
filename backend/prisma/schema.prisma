@@ -259,6 +259,14 @@ enum PolymarketAutopilotAlertStatus {
   RESOLVED
 }
 
+enum AnalyticsWindow {
+  DAILY
+  WEEKLY
+  MONTHLY
+  ROLLING_7_DAYS
+  ROLLING_30_DAYS
+}
+
 // ─────────────────────────────────────────────
 // PART 1: CORE TABLES
 // ─────────────────────────────────────────────
@@ -319,6 +327,8 @@ model Workspace {
   broadcastCampaigns BroadcastCampaign[]
   broadcastCampaignAudiences BroadcastCampaignAudience[]
   broadcastCampaignRecipients BroadcastCampaignRecipient[]
+  analyticsMetricSnapshots AnalyticsMetricSnapshot[]
+  analyticsSummaryCaches AnalyticsSummaryCache[]
 
   @@map("workspaces")
 }
@@ -530,6 +540,7 @@ model Agent {
   appointmentAvailabilities AppointmentAvailability[]
   crmCustomerPipelineEntriesAssigned CrmCustomerPipelineEntry[]
   broadcastCampaignsAssigned BroadcastCampaign[]
+  analyticsMetricSnapshots AnalyticsMetricSnapshot[]
 
   @@map("agents")
 }
@@ -1036,6 +1047,54 @@ model BroadcastCampaignRecipient {
   @@index([workspaceId, campaignId, recipientStatus])
   @@index([channelSessionId])
   @@map("broadcast_campaign_recipients")
+}
+
+model AnalyticsMetricSnapshot {
+  id          String          @id @default(cuid())
+  workspaceId String          @map("workspace_id")
+  agentId     String?         @map("agent_id")
+  scopeKey    String          @map("scope_key")
+  metricType  String          @map("metric_type")
+  metricValue Decimal         @map("metric_value") @db.Decimal(18, 4)
+  metricDate  DateTime        @map("metric_date")
+  skillType   String?         @map("skill_type")
+  window      AnalyticsWindow @default(DAILY)
+  metadataJson Json?          @map("metadata_json")
+  createdAt   DateTime        @default(now()) @map("created_at")
+  updatedAt   DateTime        @updatedAt @map("updated_at")
+
+  workspace   Workspace       @relation(fields: [workspaceId], references: [id])
+  agent       Agent?          @relation(fields: [agentId], references: [id], onDelete: SetNull)
+
+  @@unique([workspaceId, scopeKey, metricType, metricDate, window])
+  @@index([workspaceId, metricDate])
+  @@index([workspaceId, metricType, window])
+  @@index([workspaceId, agentId, metricDate])
+  @@index([workspaceId, skillType, metricDate])
+  @@map("analytics_metric_snapshots")
+}
+
+model AnalyticsSummaryCache {
+  id            String          @id @default(cuid())
+  workspaceId   String          @map("workspace_id")
+  agentId       String?         @map("agent_id")
+  scopeKey      String          @map("scope_key")
+  cacheKey      String          @map("cache_key")
+  skillType     String?         @map("skill_type")
+  window        AnalyticsWindow @default(DAILY)
+  rangeStart    DateTime        @map("range_start")
+  rangeEnd      DateTime        @map("range_end")
+  summaryJson   Json            @map("summary_json")
+  lastComputedAt DateTime       @default(now()) @map("last_computed_at")
+  createdAt     DateTime        @default(now()) @map("created_at")
+  updatedAt     DateTime        @updatedAt @map("updated_at")
+
+  workspace     Workspace       @relation(fields: [workspaceId], references: [id])
+
+  @@unique([workspaceId, scopeKey, cacheKey, window, rangeStart, rangeEnd])
+  @@index([workspaceId, cacheKey, updatedAt])
+  @@index([workspaceId, skillType, updatedAt])
+  @@map("analytics_summary_caches")
 }
 
 // ─────────────────────────────────────────────

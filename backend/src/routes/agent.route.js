@@ -27,6 +27,9 @@ import {
   BROADCAST_CAMPAIGN_SKILL_KEY,
 } from '../lib/broadcast-campaign.js';
 import {
+  ANALYTICS_DASHBOARD_SKILL_KEY,
+} from '../lib/analytics-dashboard.js';
+import {
   AI_PROVIDER_DB_VALUE,
   getAiProviderConfig,
 } from '../lib/ai-provider-config.js';
@@ -128,6 +131,17 @@ function assertSkillAccessModeRestrictions({ skillKeys, accessMode, reply }) {
     return false;
   }
 
+  if (
+    uniqueSkills.includes(ANALYTICS_DASHBOARD_SKILL_KEY)
+    && normalizedAccessMode !== 'APPROVAL_REQUIRED'
+  ) {
+    reply.code(403).send({
+      error: 'Forbidden',
+      message: 'Analytics Dashboard hanya boleh dipakai agent dengan access mode Approval Required.',
+    });
+    return false;
+  }
+
   return true;
 }
 
@@ -165,6 +179,14 @@ const createAgentSchema = z.object({
     canDeleteCampaign: z.boolean().optional(),
     canScheduleCampaign: z.boolean().optional(),
     canViewCampaignAnalytics: z.boolean().optional(),
+  }).optional(),
+  analyticsDashboardConfig: z.object({
+    canViewAnalytics: z.boolean().optional(),
+    canViewRevenueAnalytics: z.boolean().optional(),
+    canViewAgentPerformance: z.boolean().optional(),
+    canViewBroadcastAnalytics: z.boolean().optional(),
+    canViewAppointmentAnalytics: z.boolean().optional(),
+    canViewPaymentAnalytics: z.boolean().optional(),
   }).optional(),
   sharedWorkspaceAccess: z.enum(['none', 'ro', 'rw']).optional(),
   accessMode: z.enum(['OPEN_ACCESS', 'APPROVAL_REQUIRED']).optional(),
@@ -206,6 +228,14 @@ const updateAgentSchema = z.object({
     canScheduleCampaign: z.boolean().optional(),
     canViewCampaignAnalytics: z.boolean().optional(),
   }).optional(),
+  analyticsDashboardConfig: z.object({
+    canViewAnalytics: z.boolean().optional(),
+    canViewRevenueAnalytics: z.boolean().optional(),
+    canViewAgentPerformance: z.boolean().optional(),
+    canViewBroadcastAnalytics: z.boolean().optional(),
+    canViewAppointmentAnalytics: z.boolean().optional(),
+    canViewPaymentAnalytics: z.boolean().optional(),
+  }).optional(),
   sharedWorkspaceAccess: z.enum(['none', 'ro', 'rw']).optional(),
   accessMode: z.enum(['OPEN_ACCESS', 'APPROVAL_REQUIRED']).optional(),
 });
@@ -219,6 +249,7 @@ function buildAgentUpdateData(existing, payload) {
     appointmentSchedulerConfig,
     crmPipelineConfig,
     broadcastCampaignConfig,
+    analyticsDashboardConfig,
     sharedWorkspaceAccess,
     accessMode,
     ...rest
@@ -231,6 +262,7 @@ function buildAgentUpdateData(existing, payload) {
     'appointmentSchedulerConfig',
     'crmPipelineConfig',
     'broadcastCampaignConfig',
+    'analyticsDashboardConfig',
     'sharedWorkspaceAccess',
   ].some((key) => Object.prototype.hasOwnProperty.call(payload, key));
   const nextAccessMode = Object.prototype.hasOwnProperty.call(payload, 'accessMode')
@@ -372,6 +404,7 @@ export default async function agentRoute(fastify) {
       appointmentSchedulerConfig,
       crmPipelineConfig,
       broadcastCampaignConfig,
+      analyticsDashboardConfig,
       sharedWorkspaceAccess,
       accessMode,
       workspaceId,
@@ -447,6 +480,7 @@ export default async function agentRoute(fastify) {
           appointmentSchedulerConfig,
           crmPipelineConfig,
           broadcastCampaignConfig,
+          analyticsDashboardConfig,
           sharedWorkspaceAccess: normalizedSharedWorkspaceAccess,
         }) || undefined,
         status: 'INACTIVE',

@@ -12,6 +12,7 @@
  * dari repo resmi openclaw/openclaw.
  */
 
+import { createHmac, timingSafeEqual } from 'crypto';
 import { readFileSync, writeFileSync, cpSync, existsSync, mkdirSync, readdirSync, rmSync, mkdtempSync, chmodSync, statSync } from 'fs';
 import { dirname, join } from 'path';
 import { homedir, tmpdir } from 'os';
@@ -47,9 +48,13 @@ const SKILLS_SOURCE = join(process.cwd(), 'skills');
 const HOOKS_SOURCE = join(process.cwd(), 'hooks');
 const PLUGINS_SOURCE = join(process.cwd(), 'plugins');
 const ADAPTER_PORT = parseInt(process.env.ADAPTER_PORT || '4000', 10);
+const ADAPTER_PUBLIC_URL = process.env.MYAGENTCLAW_ADAPTER_PUBLIC_URL || `http://openclaw-adapter:${ADAPTER_PORT}`;
+const ADAPTER_CONTROL_TOKEN = String(process.env.OPENCLAW_ADAPTER_CONTROL_TOKEN || '').trim();
+const BACKEND_INTERNAL_URL = process.env.BACKEND_INTERNAL_URL || 'http://backend:3001';
+const BACKEND_INTERNAL_SECRET = String(process.env.INTERNAL_SECRET_KEY || '').trim();
 const GATEWAY_URL = process.env.OPENCLAW_GATEWAY_URL || 'http://openclaw:18789';
-const GATEWAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || '';
-const RESOLVED_GATEWAY_TOKEN = GATEWAY_TOKEN || process.env.INTERNAL_SECRET_KEY || '';
+const GATEWAY_TOKEN = String(process.env.OPENCLAW_GATEWAY_TOKEN || '').trim();
+const RESOLVED_GATEWAY_TOKEN = GATEWAY_TOKEN;
 const CLAWHUB_URL = (process.env.OPENCLAW_CLAWHUB_URL || process.env.CLAWHUB_URL || 'https://clawhub.ai').replace(/\/+$/, '');
 const CLAWHUB_DOWNLOAD_URL = (process.env.OPENCLAW_CLAWHUB_DOWNLOAD_URL || process.env.CLAWHUB_DOWNLOAD_URL || 'https://wry-manatee-359.convex.site').replace(/\/+$/, '');
 const OPENAI_CODEX_BASE_URL = 'https://chatgpt.com/backend-api';
@@ -78,6 +83,25 @@ function getChannelLabel(channelType) {
 
 function asPlainObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? { ...value } : {};
+}
+
+function safeCompareSecret(candidate, expected) {
+  const left = Buffer.from(String(candidate || ''), 'utf8');
+  const right = Buffer.from(String(expected || ''), 'utf8');
+  return left.length === right.length && left.length > 0 && timingSafeEqual(left, right);
+}
+
+function buildAgentKnowledgeAccessToken(agentId) {
+  const normalizedAgentId = String(agentId || '').trim();
+  if (!normalizedAgentId || !ADAPTER_CONTROL_TOKEN) return '';
+  return createHmac('sha256', ADAPTER_CONTROL_TOKEN)
+    .update(`agent-knowledge:${normalizedAgentId}`)
+    .digest('base64url');
+}
+
+function verifyAgentKnowledgeAccessToken(agentId, accessToken) {
+  const expected = buildAgentKnowledgeAccessToken(agentId);
+  return safeCompareSecret(accessToken, expected);
 }
 
 function isCustomerMessagingChannel(channelType) {
@@ -2573,9 +2597,7 @@ function buildAgentsMd(channelId, cfg = {}) {
     sharedWorkspaceFolder = SHARED_WORKSPACE_FOLDER,
   } = cfg;
 
-  const backendUrl  = process.env.BACKEND_INTERNAL_URL || 'http://backend:3001';
-  const internalKey = process.env.INTERNAL_SECRET_KEY  || '';
-  const knowledgeUrl = `${backendUrl}/internal/knowledge/${agentId}?internal_key=${encodeURIComponent(internalKey)}`;
+  const knowledgeUrl = `${ADAPTER_PUBLIC_URL}/agent-knowledge/${encodeURIComponent(agentId)}/${buildAgentKnowledgeAccessToken(agentId)}`;
   const normalizedSkills = normalizeAssignedSkills(assignedSkills ?? openclawSkill) || [];
   const skillsLabel = normalizedSkills.map((skill) => `**${skill}**`).join(', ');
   const assignedSkillPrompt = loadAssignedSkillPrompts(normalizedSkills);
@@ -2636,7 +2658,7 @@ Penyimpanan pesan pelanggan dan balasan AI sudah ditangani sistem internal secar
 \`\`\`
 GET ${knowledgeUrl}
 \`\`\`
-Gunakan tool \`web_fetch\` ke URL persis di atas, lalu pakai konten response untuk menjawab dengan akurat.
+Gunakan tool \`web_fetch\` ke URL persis di atas. URL ini hanya berlaku untuk agent ini, jangan diubah, dan pakai konten response untuk menjawab dengan akurat.
 
 ### Langkah 3 — Balas pelanggan
 Tulis balasan yang helpful, singkat, dan sesuai gaya bicara di atas.
@@ -2677,6 +2699,30 @@ Saat percakapan baru dimulai (sesi baru), perkenalkan diri sebagai ${name} dari 
 
 async function startAdapterApi() {
   const api = Fastify({ logger: false });
+
+  api.addHook('onRequest', async (req, reply) => {
+    const requestPath = req.raw.url || '';
+    if (requestPath === '/health' || requestPath.startsWith('/agent-knowledge/')) {
+      return;
+    }
+
+    if (!ADAPTER_CONTROL_TOKEN) {
+      reply.code(503).send({ error: 'Service Unavailable', message: 'OPENCLAW_ADAPTER_CONTROL_TOKEN belum dikonfigurasi' });
+      return;
+    }
+
+    const authHeader = typeof req.headers.authorization === 'string' ? req.headers.authorization.trim() : '';
+    const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    const legacyToken = typeof req.headers['x-myagentclaw-adapter-token'] === 'string'
+      ? req.headers['x-myagentclaw-adapter-token'].trim()
+      : '';
+    const providedToken = bearerToken || legacyToken;
+
+    if (!safeCompareSecret(providedToken, ADAPTER_CONTROL_TOKEN)) {
+      reply.code(403).send({ error: 'Forbidden', message: 'Adapter control token tidak valid' });
+      return;
+    }
+  });
 
   const registerAliasRoutes = (paths, handler) => {
     for (const path of [...new Set(paths)]) {
@@ -2846,6 +2892,35 @@ async function startAdapterApi() {
     gatewayConfigPath: CONFIG_PATH,
     timestamp: new Date().toISOString(),
   }));
+
+  api.get('/agent-knowledge/:agentId/:accessToken', async (req, reply) => {
+    const { agentId, accessToken } = req.params || {};
+    if (!agentId || !accessToken || !verifyAgentKnowledgeAccessToken(agentId, accessToken)) {
+      return reply.code(403).send({ error: 'Forbidden', message: 'Knowledge access token tidak valid' });
+    }
+
+    if (!BACKEND_INTERNAL_SECRET) {
+      return reply.code(503).send({ error: 'Service Unavailable', message: 'Internal backend secret belum dikonfigurasi' });
+    }
+
+    const response = await fetch(`${BACKEND_INTERNAL_URL}/internal/knowledge/${encodeURIComponent(agentId)}`, {
+      headers: {
+        'x-internal-key': BACKEND_INTERNAL_SECRET,
+      },
+      signal: AbortSignal.timeout(10000),
+    }).catch((error) => ({ ok: false, status: 502, text: async () => error.message }));
+
+    if (!response.ok) {
+      const text = typeof response.text === 'function' ? await response.text().catch(() => '') : '';
+      return reply.code(response.status || 502).send({
+        error: 'Knowledge fetch failed',
+        message: text || 'Tidak dapat mengambil knowledge base agent.',
+      });
+    }
+
+    const payload = await response.json().catch(() => []);
+    return payload;
+  });
 
   api.get('/bots', async () => {
     const config = readConfig();
@@ -3149,6 +3224,15 @@ async function startAdapterApi() {
 async function main() {
   console.log('[gateway-manager] myagentclaw openclaw adapter starting...');
   try {
+    if (!ADAPTER_CONTROL_TOKEN) {
+      throw new Error('OPENCLAW_ADAPTER_CONTROL_TOKEN wajib diisi sebelum adapter dijalankan.');
+    }
+    if (!GATEWAY_TOKEN) {
+      throw new Error('OPENCLAW_GATEWAY_TOKEN wajib diisi sebelum adapter dijalankan.');
+    }
+    if (!BACKEND_INTERNAL_SECRET) {
+      throw new Error('INTERNAL_SECRET_KEY wajib diisi sebelum adapter dijalankan.');
+    }
     validateAiProviderConfig(console);
     setup();
     await startAdapterApi();

@@ -131,6 +131,7 @@ export function mergeAgentConfig(existingConfig, payload) {
     || Object.prototype.hasOwnProperty.call(payload, 'appointmentSchedulerConfig')
     || Object.prototype.hasOwnProperty.call(payload, 'crmPipelineConfig')
     || Object.prototype.hasOwnProperty.call(payload, 'broadcastCampaignConfig')
+    || Object.prototype.hasOwnProperty.call(payload, 'analyticsDashboardConfig')
   ) {
     const nextSkillConfigs = {
       ...getAgentSkillConfigs(existingConfig),
@@ -161,6 +162,15 @@ export function mergeAgentConfig(existingConfig, payload) {
         nextSkillConfigs['broadcast-campaign'] = broadcastCampaignConfig;
       } else {
         delete nextSkillConfigs['broadcast-campaign'];
+      }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(payload, 'analyticsDashboardConfig')) {
+      const analyticsDashboardConfig = asPlainObject(payload.analyticsDashboardConfig);
+      if (Object.keys(analyticsDashboardConfig).length > 0) {
+        nextSkillConfigs['analytics-dashboard'] = analyticsDashboardConfig;
+      } else {
+        delete nextSkillConfigs['analytics-dashboard'];
       }
     }
 

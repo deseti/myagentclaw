@@ -92,6 +92,15 @@ const BROADCAST_CAMPAIGN_DEFAULT_CONFIG = {
   canViewCampaignAnalytics: true,
 };
 
+const ANALYTICS_DASHBOARD_DEFAULT_CONFIG = {
+  canViewAnalytics: true,
+  canViewRevenueAnalytics: true,
+  canViewAgentPerformance: true,
+  canViewBroadcastAnalytics: true,
+  canViewAppointmentAnalytics: true,
+  canViewPaymentAnalytics: true,
+};
+
 const WEEKDAY_OPTIONS = [
   { value: 1, label: 'Mon' },
   { value: 2, label: 'Tue' },
@@ -136,6 +145,14 @@ const agentSchema = z.object({
     canDeleteCampaign: z.boolean().optional(),
     canScheduleCampaign: z.boolean().optional(),
     canViewCampaignAnalytics: z.boolean().optional(),
+  }).optional(),
+  analyticsDashboardConfig: z.object({
+    canViewAnalytics: z.boolean().optional(),
+    canViewRevenueAnalytics: z.boolean().optional(),
+    canViewAgentPerformance: z.boolean().optional(),
+    canViewBroadcastAnalytics: z.boolean().optional(),
+    canViewAppointmentAnalytics: z.boolean().optional(),
+    canViewPaymentAnalytics: z.boolean().optional(),
   }).optional(),
   systemPrompt: z.string().max(12000, 'System prompt maksimal 12000 karakter').optional(),
   sharedWorkspaceAccess: z.enum(['none', 'ro', 'rw']).optional(),
@@ -242,6 +259,28 @@ function readAgentBroadcastCampaignConfig(agent) {
   );
 }
 
+function normalizeAnalyticsDashboardConfig(value) {
+  const raw = value && typeof value === 'object' ? value : {};
+
+  return {
+    canViewAnalytics: raw.canViewAnalytics ?? ANALYTICS_DASHBOARD_DEFAULT_CONFIG.canViewAnalytics,
+    canViewRevenueAnalytics: raw.canViewRevenueAnalytics ?? ANALYTICS_DASHBOARD_DEFAULT_CONFIG.canViewRevenueAnalytics,
+    canViewAgentPerformance: raw.canViewAgentPerformance ?? ANALYTICS_DASHBOARD_DEFAULT_CONFIG.canViewAgentPerformance,
+    canViewBroadcastAnalytics: raw.canViewBroadcastAnalytics ?? ANALYTICS_DASHBOARD_DEFAULT_CONFIG.canViewBroadcastAnalytics,
+    canViewAppointmentAnalytics: raw.canViewAppointmentAnalytics ?? ANALYTICS_DASHBOARD_DEFAULT_CONFIG.canViewAppointmentAnalytics,
+    canViewPaymentAnalytics: raw.canViewPaymentAnalytics ?? ANALYTICS_DASHBOARD_DEFAULT_CONFIG.canViewPaymentAnalytics,
+  };
+}
+
+function readAgentAnalyticsDashboardConfig(agent) {
+  return normalizeAnalyticsDashboardConfig(
+    agent?.configJson?.skillConfigs?.[INTERNAL_SKILL_KEYS.ANALYTICS_DASHBOARD]
+      || agent?.configJson?.analyticsDashboardConfig
+      || agent?.configJson?.analyticsDashboard
+      || {},
+  );
+}
+
 function normalizeSharedWorkspaceAccess(value) {
   const normalized = String(value || '').trim().toLowerCase();
   return ['none', 'ro', 'rw'].includes(normalized) ? normalized : 'none';
@@ -332,6 +371,7 @@ export default function AgentFormPage() {
       appointmentSchedulerConfig: APPOINTMENT_SCHEDULER_DEFAULT_CONFIG,
       crmPipelineConfig: CRM_PIPELINE_DEFAULT_CONFIG,
       broadcastCampaignConfig: BROADCAST_CAMPAIGN_DEFAULT_CONFIG,
+      analyticsDashboardConfig: ANALYTICS_DASHBOARD_DEFAULT_CONFIG,
       systemPrompt: '',
       sharedWorkspaceAccess: 'none',
       accessMode: 'OPEN_ACCESS',
@@ -346,6 +386,8 @@ export default function AgentFormPage() {
   const crmPipelineConfig = normalizeCrmPipelineConfig(watchAll.crmPipelineConfig);
   const broadcastCampaignSelected = selectedSkills.includes(INTERNAL_SKILL_KEYS.BROADCAST_CAMPAIGN);
   const broadcastCampaignConfig = normalizeBroadcastCampaignConfig(watchAll.broadcastCampaignConfig);
+  const analyticsDashboardSelected = selectedSkills.includes(INTERNAL_SKILL_KEYS.ANALYTICS_DASHBOARD);
+  const analyticsDashboardConfig = normalizeAnalyticsDashboardConfig(watchAll.analyticsDashboardConfig);
   const availableAdvancedRoles = getAvailableAdvancedRolePresets(installedSkills, selectedSkills);
   const selectedRolePreset = getRolePresetByKey(selectedRoleKey) || getRolePresetByRoleName(watchAll.role) || DEFAULT_ROLE_PRESET;
   const selectedAccessMode = watchAll.accessMode || 'OPEN_ACCESS';
@@ -391,6 +433,7 @@ export default function AgentFormPage() {
             appointmentSchedulerConfig: readAgentAppointmentSchedulerConfig(agent),
             crmPipelineConfig: readAgentCrmPipelineConfig(agent),
             broadcastCampaignConfig: readAgentBroadcastCampaignConfig(agent),
+            analyticsDashboardConfig: readAgentAnalyticsDashboardConfig(agent),
             systemPrompt: agent.configJson?.systemPrompt || '',
             sharedWorkspaceAccess: currentTier === 'FREE'
               ? 'none'
@@ -429,6 +472,9 @@ export default function AgentFormPage() {
         broadcastCampaignConfig: workspaceTier === 'FREE' || !normalizeAssignedSkills(data.assignedSkills).includes(INTERNAL_SKILL_KEYS.BROADCAST_CAMPAIGN)
           ? undefined
           : normalizeBroadcastCampaignConfig(data.broadcastCampaignConfig),
+        analyticsDashboardConfig: workspaceTier === 'FREE' || !normalizeAssignedSkills(data.assignedSkills).includes(INTERNAL_SKILL_KEYS.ANALYTICS_DASHBOARD)
+          ? undefined
+          : normalizeAnalyticsDashboardConfig(data.analyticsDashboardConfig),
         systemPrompt: data.systemPrompt || '',
         sharedWorkspaceAccess: workspaceTier === 'FREE'
           ? 'none'
@@ -459,6 +505,10 @@ export default function AgentFormPage() {
     if (skillKey === INTERNAL_SKILL_KEYS.BROADCAST_CAMPAIGN && !selectedSkills.includes(skillKey)) {
       setValue('accessMode', 'APPROVAL_REQUIRED', { shouldDirty: true, shouldValidate: true });
     }
+
+    if (skillKey === INTERNAL_SKILL_KEYS.ANALYTICS_DASHBOARD && !selectedSkills.includes(skillKey)) {
+      setValue('accessMode', 'APPROVAL_REQUIRED', { shouldDirty: true, shouldValidate: true });
+    }
   };
 
   const toggleAppointmentWorkingDay = (dayValue) => {
@@ -479,6 +529,10 @@ export default function AgentFormPage() {
 
   const setBroadcastCampaignField = (field, value) => {
     setValue(`broadcastCampaignConfig.${field}`, value, { shouldDirty: true, shouldValidate: true });
+  };
+
+  const setAnalyticsDashboardField = (field, value) => {
+    setValue(`analyticsDashboardConfig.${field}`, value, { shouldDirty: true, shouldValidate: true });
   };
 
   const applyRolePreset = (preset) => {
@@ -705,6 +759,11 @@ export default function AgentFormPage() {
                                 Unlocks Campaign Operator role, Broadcast Campaign dashboard, scheduled send worker, dan capability agent untuk create, edit, delete, schedule, serta view analytics campaign. Skill ini hanya valid untuk agent Approval Required.
                               </p>
                             )}
+                            {skill.skillKey === INTERNAL_SKILL_KEYS.ANALYTICS_DASHBOARD && (
+                              <p className="mt-2 text-[11px] text-sky-300">
+                                Unlocks Analytics Observer role, Analytics Dashboard sidebar, snapshot worker, dan capability agent untuk analytics umum, revenue, agent performance, broadcast, appointment, serta payment analytics. Skill ini hanya valid untuk agent Approval Required.
+                              </p>
+                            )}
                           </div>
                         </label>
                       );
@@ -928,6 +987,62 @@ export default function AgentFormPage() {
                       </p>
                       <p className="text-xs text-slate-400">
                         Nilai ini dikirim ke runtime agent melalui skill config map dan ikut terhapus otomatis saat skill Broadcast dilepas atau diuninstall.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {analyticsDashboardSelected && (
+                  <div className="rounded-xl border border-cyan-500/30 bg-cyan-500/10 p-4 space-y-4">
+                    <div className="space-y-1">
+                      <Label>Analytics Dashboard Capability</Label>
+                      <p className="text-xs text-cyan-100/80">
+                        Konfigurasi ini menentukan capability analytics yang diizinkan untuk agent Analytics Dashboard. Workspace tier tetap menjadi guardrail akhir: Starter hanya basic analytics, Growth membuka advanced chart dan trend, sedangkan Pro membuka revenue dan agent performance analytics penuh.
+                      </p>
+                    </div>
+
+                    <div className="rounded-xl border border-slate-700 bg-slate-950/70 p-4 space-y-2">
+                      <p className="text-xs uppercase tracking-[0.24em] text-slate-500">Access Restriction</p>
+                      <p className="text-sm text-slate-200">
+                        Analytics Dashboard hanya boleh dipakai agent dengan access mode Approval Required.
+                      </p>
+                      <p className="text-xs text-slate-400">
+                        Owner tetap membuka dashboard dari workspace, tetapi runtime analytics agent hanya dianggap aktif bila skill ini diassign ke minimal satu agent Approval Required.
+                      </p>
+                    </div>
+
+                    <div className="grid gap-3 md:grid-cols-2">
+                      {[
+                        ['canViewAnalytics', 'Can View Analytics', false],
+                        ['canViewRevenueAnalytics', 'Can View Revenue Analytics', workspaceTier !== 'PRO'],
+                        ['canViewAgentPerformance', 'Can View Agent Performance', workspaceTier !== 'PRO'],
+                        ['canViewBroadcastAnalytics', 'Can View Broadcast Analytics', workspaceTier === 'STARTER'],
+                        ['canViewAppointmentAnalytics', 'Can View Appointment Analytics', workspaceTier === 'STARTER'],
+                        ['canViewPaymentAnalytics', 'Can View Payment Analytics', workspaceTier === 'STARTER'],
+                      ].map(([field, label, disabled]) => (
+                        <label key={field} className="flex items-center justify-between rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2 text-sm text-slate-200">
+                          <span>{label}</span>
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4 rounded border-slate-600 bg-slate-950"
+                            checked={Boolean(analyticsDashboardConfig[field])}
+                            disabled={Boolean(disabled)}
+                            onChange={(event) => setAnalyticsDashboardField(field, event.target.checked)}
+                          />
+                        </label>
+                      ))}
+                    </div>
+
+                    <div className="rounded-xl border border-slate-700 bg-slate-950/70 p-4 space-y-2">
+                      <p className="text-xs uppercase tracking-[0.24em] text-slate-500">Capability Summary</p>
+                      <p className="text-sm text-slate-200">
+                        {Object.entries(analyticsDashboardConfig)
+                          .filter(([, enabled]) => Boolean(enabled))
+                          .map(([field]) => field)
+                          .join(', ') || 'Belum ada capability Analytics yang aktif.'}
+                      </p>
+                      <p className="text-xs text-slate-400">
+                        Capability unsupported oleh tier workspace akan diabaikan server walaupun dicentang di form ini.
                       </p>
                     </div>
                   </div>

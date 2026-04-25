@@ -7,15 +7,44 @@ set -e
 
 echo "[entrypoint] Starting myagentclaw backend..."
 
+build_database_url() {
+  node <<'NODE'
+const stripTrailingCr = (value) => String(value || '').replace(/\r$/, '');
+const normalizeValue = (value) => stripTrailingCr(value).trim();
+
+const user = normalizeValue(process.env.POSTGRES_USER);
+const password = stripTrailingCr(process.env.POSTGRES_PASSWORD);
+const host = normalizeValue(process.env.POSTGRES_HOST || 'postgres') || 'postgres';
+const port = normalizeValue(process.env.POSTGRES_PORT || '5432') || '5432';
+const database = normalizeValue(process.env.POSTGRES_DB);
+const fallbackUrl = normalizeValue(process.env.DATABASE_URL);
+
+if (!user || !database) {
+  if (fallbackUrl) {
+    process.stdout.write(fallbackUrl);
+    process.exit(0);
+  }
+
+  process.stderr.write('[entrypoint] ERROR: POSTGRES_USER/POSTGRES_DB atau DATABASE_URL wajib diisi.\n');
+  process.exit(1);
+}
+
+const auth = `${encodeURIComponent(user)}:${encodeURIComponent(password)}`;
+process.stdout.write(`postgresql://${auth}@${host}:${port}/${encodeURIComponent(database)}?schema=public`);
+NODE
+}
+
+if [ -n "${POSTGRES_USER:-}" ] || [ -n "${POSTGRES_DB:-}" ]; then
+  export DATABASE_URL="$(build_database_url)"
+fi
+
+DB_HOST=${POSTGRES_HOST:-postgres}
+DB_PORT=${POSTGRES_PORT:-5432}
+
 # ---------------------------------------------------------------------------
 # Tunggu PostgreSQL siap menerima koneksi
-# Ekstrak host dan port dari DATABASE_URL
-# format: postgresql://user:pass@host:port/db
+# Gunakan host/port terpisah agar aman meski credential mengandung karakter URL reserved
 # ---------------------------------------------------------------------------
-DB_HOST=$(echo "$DATABASE_URL" | sed -E 's|.*@([^:/]+).*|\1|')
-DB_PORT=$(echo "$DATABASE_URL" | sed -E 's|.*:([0-9]+)/.*|\1|')
-DB_PORT=${DB_PORT:-5432}
-
 echo "[entrypoint] Waiting for PostgreSQL at ${DB_HOST}:${DB_PORT}..."
 
 MAX_RETRIES=30

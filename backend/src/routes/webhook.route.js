@@ -24,7 +24,7 @@ export default async function xenditWebhookRoute(fastify) {
     // Verifikasi Xendit callback token
     const callbackToken = request.headers['x-callback-token'];
     if (!callbackToken || callbackToken !== process.env.XENDIT_WEBHOOK_TOKEN) {
-      fastify.log.warn({ headers: request.headers }, 'Invalid Xendit webhook token');
+      fastify.log.warn({ hasCallbackToken: Boolean(callbackToken) }, 'Invalid Xendit webhook token');
       return reply.code(401).send({ error: 'Unauthorized' });
     }
 

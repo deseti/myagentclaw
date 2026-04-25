@@ -1,3 +1,4 @@
+import { createHmac } from 'node:crypto';
 import http from 'node:http';
 
 import prisma from './prisma.js';
@@ -13,7 +14,10 @@ const DEFAULT_ADAPTER_IMAGE = process.env.MYAGENTCLAW_ADAPTER_RUNTIME_IMAGE || '
 const AI_PROVIDER_CONFIG = getAiProviderConfig();
 const DEFAULT_AI_PROVIDER_MODEL = AI_PROVIDER_CONFIG.model;
 const DEFAULT_AI_PROVIDER_IMAGE_MODEL = AI_PROVIDER_CONFIG.imageModel;
-const DEDICATED_GATEWAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || process.env.INTERNAL_SECRET_KEY || 'myagentclaw-dedicated-gateway-token';
+const SHARED_GATEWAY_TOKEN = String(process.env.OPENCLAW_GATEWAY_TOKEN || '').trim();
+const SHARED_ADAPTER_CONTROL_TOKEN = String(process.env.OPENCLAW_ADAPTER_CONTROL_TOKEN || '').trim();
+const DEDICATED_GATEWAY_TOKEN_SECRET = String(process.env.MYAGENTCLAW_DEDICATED_GATEWAY_TOKEN_SECRET || '').trim();
+const DEDICATED_ADAPTER_CONTROL_TOKEN_SECRET = String(process.env.MYAGENTCLAW_DEDICATED_ADAPTER_CONTROL_TOKEN_SECRET || '').trim();
 const BOOTSTRAP_OPENCLAW_HOME = '/home/node/.openclaw-bootstrap';
 const OPENCLAW_RUNTIME_WORKDIR = process.env.MYAGENTCLAW_OPENCLAW_RUNTIME_WORKDIR || '/app';
 const LEGACY_RUNTIME_WHATSAPP_AUTH_ROOT = `${OPENCLAW_RUNTIME_WORKDIR}/auth`;
@@ -40,6 +44,24 @@ function buildRuntimeNames(ownerId) {
     adapterContainerName: `myagentclaw_openclaw_adapter_owner_${slug}`,
     volumeName: `myagentclaw_openclaw_data_owner_${slug}`,
   };
+}
+
+function deriveScopedRuntimeToken(secret, scope) {
+  if (!secret) {
+    throw new Error(`Konfigurasi token runtime untuk scope ${scope} belum diatur.`);
+  }
+
+  return createHmac('sha256', secret)
+    .update(String(scope))
+    .digest('base64url');
+}
+
+function buildDedicatedGatewayToken(ownerId) {
+  return deriveScopedRuntimeToken(DEDICATED_GATEWAY_TOKEN_SECRET, `gateway:${ownerId}`);
+}
+
+function buildDedicatedAdapterControlToken(ownerId) {
+  return deriveScopedRuntimeToken(DEDICATED_ADAPTER_CONTROL_TOKEN_SECRET, `adapter:${ownerId}`);
 }
 
 function requestDocker(method, path, body) {
@@ -437,6 +459,7 @@ export async function ensureWorkspaceRuntime(workspace, options = {}) {
       mode: 'SHARED',
       tier: 'FREE',
       adapterUrl: SHARED_ADAPTER_URL,
+      adapterControlToken: SHARED_ADAPTER_CONTROL_TOKEN,
       openclawContainerName: SHARED_OPENCLAW_CONTAINER,
       adapterContainerName: SHARED_ADAPTER_CONTAINER,
       ownerId: workspace.ownerId || '',
@@ -446,6 +469,8 @@ export async function ensureWorkspaceRuntime(workspace, options = {}) {
   await ensureDockerSocketAvailable();
 
   const names = buildRuntimeNames(workspace.ownerId);
+  const dedicatedGatewayToken = buildDedicatedGatewayToken(workspace.ownerId);
+  const dedicatedAdapterControlToken = buildDedicatedAdapterControlToken(workspace.ownerId);
   const networkName = await detectBackendNetworkName();
   const sharedStateVolumeName = await resolveSharedStateVolumeName();
   const bootstrapBind = `${sharedStateVolumeName}:${BOOTSTRAP_OPENCLAW_HOME}:ro`;
@@ -483,7 +508,8 @@ export async function ensureWorkspaceRuntime(workspace, options = {}) {
       envLiteral('OPENCLAW_HOME', '/home/node/.openclaw'),
       envLiteral('OPENCLAW_BOOTSTRAP_HOME', BOOTSTRAP_OPENCLAW_HOME),
       `OPENCLAW_GATEWAY_URL=http://${names.openclawContainerName}:18789`,
-      `OPENCLAW_GATEWAY_TOKEN=${DEDICATED_GATEWAY_TOKEN}`,
+      envLiteral('OPENCLAW_GATEWAY_TOKEN', dedicatedGatewayToken),
+      envLiteral('OPENCLAW_ADAPTER_CONTROL_TOKEN', dedicatedAdapterControlToken),
       envValue('OPENAI_OAUTH_TOKEN'),
       envValue('OPENAI_API_KEY'),
       envValue('OPENAI_BASE_URL', AI_PROVIDER_CONFIG.baseURL),
@@ -496,6 +522,7 @@ export async function ensureWorkspaceRuntime(workspace, options = {}) {
       envValue('OPENAI_REASONING', AI_PROVIDER_CONFIG.reasoning),
       envValue('ADAPTER_PORT', '4000'),
       envValue('OPENCLAW_GATEWAY_PORT', '18789'),
+      `MYAGENTCLAW_ADAPTER_PUBLIC_URL=http://${names.adapterContainerName}:4000`,
       envValue('INTERNAL_SECRET_KEY'),
       envValue('BACKEND_INTERNAL_URL', 'http://backend:3001'),
       `MYAGENTCLAW_RUNTIME_TIER=${workspace.subTier}`,
@@ -525,7 +552,7 @@ export async function ensureWorkspaceRuntime(workspace, options = {}) {
       envLiteral('HOME', '/home/node'),
       envValue('NODE_ENV', 'production'),
       envValue('OPENCLAW_GATEWAY_PORT', '18789'),
-      envLiteral('OPENCLAW_GATEWAY_TOKEN', DEDICATED_GATEWAY_TOKEN),
+      envLiteral('OPENCLAW_GATEWAY_TOKEN', dedicatedGatewayToken),
       envValue('OPENAI_OAUTH_TOKEN'),
       envValue('OPENAI_API_KEY'),
       envValue('OPENAI_BASE_URL', AI_PROVIDER_CONFIG.baseURL),
@@ -539,7 +566,7 @@ export async function ensureWorkspaceRuntime(workspace, options = {}) {
       envValue('INTERNAL_SECRET_KEY'),
       envValue('BACKEND_INTERNAL_URL', 'http://backend:3001'),
     ],
-    cmd: ['node', 'dist/index.js', 'gateway', '--bind', 'lan', '--port', '18789', '--allow-unconfigured'],
+    cmd: ['node', 'dist/index.js', 'gateway', '--bind', 'lan', '--port', '18789'],
     extraBinds: [bootstrapBind],
     forceRecreate: forceRecreateOpenclaw,
   });
@@ -552,6 +579,7 @@ export async function ensureWorkspaceRuntime(workspace, options = {}) {
     tier: workspace.subTier,
     ownerId: workspace.ownerId,
     adapterUrl,
+    adapterControlToken: dedicatedAdapterControlToken,
     ...names,
   };
 }
